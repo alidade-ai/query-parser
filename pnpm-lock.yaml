@@ -8,6 +8,12 @@ importers:
 
   .:
     devDependencies:
+      '@emnapi/core':
+        specifier: ^1.7.1
+        version: 1.7.1
+      '@emnapi/runtime':
+        specifier: ^1.7.1
+        version: 1.7.1
       '@napi-rs/cli':
         specifier: ^3.5.0
         version: 3.5.0(@emnapi/runtime@1.7.1)
@@ -17,6 +23,9 @@ importers:
       '@oxc-node/core':
         specifier: ^0.0.35
         version: 0.0.35
+      '@tybys/wasm-util':
+        specifier: ^0.10.1
+        version: 0.10.1
       ava:
         specifier: ^6.4.1
         version: 6.4.1
