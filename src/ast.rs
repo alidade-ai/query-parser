@@ -215,10 +215,7 @@ pub enum QueryNode {
     /// Boolean clause
     Clause(Clause),
     /// Boosted node
-    Boost {
-        factor: f64,
-        node: Box<QueryNode>,
-    },
+    Boost { factor: f64, node: Box<QueryNode> },
 }
 
 impl From<&UserInputAst> for QueryNode {

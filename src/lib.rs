@@ -4,7 +4,7 @@ mod parser;
 
 pub use ast::*;
 pub use diagnostics::*;
-pub use parser::{parse_and_lint, parse_query, validate_query, Linter, LinterPipeline};
+pub use parser::{Linter, LinterPipeline, parse_and_lint, parse_query, validate_query};
 
 use napi_derive::napi;
 
@@ -34,9 +34,10 @@ pub fn parse(query: String) -> ParseOutput {
 
     ParseOutput {
         ok: result.is_ok(),
-        ast: result.ast.as_ref().map(|ast| {
-            serde_json::to_string(ast).unwrap_or_else(|_| "null".to_string())
-        }),
+        ast: result
+            .ast
+            .as_ref()
+            .map(|ast| serde_json::to_string(ast).unwrap_or_else(|_| "null".to_string())),
         diagnostics: result.diagnostics,
         stats: result.stats,
     }
