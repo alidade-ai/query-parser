@@ -202,8 +202,8 @@ jobs:
           " >> $GITHUB_OUTPUT
       - name: Install dependencies
         run: |
-          pnpm config set --json supportedArchitectures.cpu '["current", "arm64", "x64", "arm"]'
-          pnpm config set --json supportedArchitectures.libc '["current", "musl", "gnu"]'
+          echo 'supportedArchitectures.cpu=["current", "arm64", "x64", "arm"]' >> .npmrc
+          echo 'supportedArchitectures.libc=["current", "musl", "gnu"]' >> .npmrc
           pnpm install
       - name: Download artifacts
         uses: actions/download-artifact@v6
@@ -241,7 +241,7 @@ jobs:
           cache: pnpm
       - name: Install dependencies
         run: |
-          pnpm config set supportedArchitectures.cpu "wasm32"
+          echo 'supportedArchitectures.cpu=["wasm32"]' >> .npmrc
           pnpm install
       - name: Download artifacts
         uses: actions/download-artifact@v6
