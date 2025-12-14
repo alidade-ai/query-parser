@@ -17,6 +17,9 @@ importers:
       '@napi-rs/cli':
         specifier: ^3.5.0
         version: 3.5.0(@emnapi/runtime@1.7.1)
+      '@napi-rs/wasm-runtime':
+        specifier: ^1.1.0
+        version: 1.1.0
       '@oxc-node/core':
         specifier: ^0.0.35
         version: 0.0.35
@@ -1847,7 +1850,6 @@ snapshots:
       '@emnapi/core': 1.7.1
       '@emnapi/runtime': 1.7.1
       '@tybys/wasm-util': 0.10.1
-    optional: true
 
   '@napi-rs/wasm-tools-android-arm-eabi@1.0.1':
     optional: true
