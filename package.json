@@ -21,7 +21,7 @@
       "wasm32-wasip1-threads"
     ],
     "wasm": {
-      "initialMemory": 512,
+      "initialMemory": 1024,
       "maximumMemory": 4096,
       "browser": {
         "fs": false
