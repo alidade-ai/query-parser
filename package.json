@@ -1,8 +1,12 @@
 {
   "name": "@alidade/query-parser",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Fast Tantivy boolean query parser with diagnostics for validation and linting",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/alidade-ai/query-parser"
+  },
   "main": "index.js",
   "types": "index.d.ts",
   "browser": "browser.js",
