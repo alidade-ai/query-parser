@@ -256,7 +256,7 @@ jobs:
       - name: Test bindings
         run: pnpm test
         env:
-          NAPI_RS_FORCE_WASI: error
+          NAPI_RS_FORCE_WASI: 1
   publish:
     name: Publish
     runs-on: ubuntu-latest
