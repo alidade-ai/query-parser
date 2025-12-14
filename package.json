@@ -44,6 +44,7 @@
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.5.0",
+    "@napi-rs/wasm-runtime": "^1.1.0",
     "@oxc-node/core": "^0.0.35",
     "ava": "^6.4.1",
     "npm-run-all2": "^8.0.4",
