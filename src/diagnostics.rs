@@ -90,7 +90,7 @@ impl Diagnostic {
             severity: DiagnosticSeverity::Error,
             range,
             code: None,
-            source: Some("tantivy-query-parser".to_string()),
+            source: Some("alidade-query-parser".to_string()),
             related_info: None,
         }
     }
@@ -101,7 +101,7 @@ impl Diagnostic {
             severity: DiagnosticSeverity::Warning,
             range,
             code: None,
-            source: Some("tantivy-query-parser".to_string()),
+            source: Some("alidade-query-parser".to_string()),
             related_info: None,
         }
     }
@@ -112,7 +112,7 @@ impl Diagnostic {
             severity: DiagnosticSeverity::Info,
             range,
             code: None,
-            source: Some("tantivy-query-parser".to_string()),
+            source: Some("alidade-query-parser".to_string()),
             related_info: None,
         }
     }
@@ -123,7 +123,7 @@ impl Diagnostic {
             severity: DiagnosticSeverity::Hint,
             range,
             code: None,
-            source: Some("tantivy-query-parser".to_string()),
+            source: Some("alidade-query-parser".to_string()),
             related_info: None,
         }
     }
