@@ -1,9 +1,11 @@
 mod ast;
 mod diagnostics;
+mod linters;
 mod parser;
 
 pub use ast::*;
 pub use diagnostics::*;
+pub use linters::default_pipeline;
 pub use parser::{Linter, LinterPipeline, parse_and_lint, parse_query, validate_query};
 
 use napi_derive::napi;
@@ -30,7 +32,8 @@ pub struct ParseOutput {
 /// - `stats`: statistics about the query
 #[napi]
 pub fn parse(query: String) -> ParseOutput {
-    let result = parse_query(&query);
+    let pipeline = default_pipeline();
+    let result = parse_and_lint(&query, &pipeline);
 
     ParseOutput {
         ok: result.is_ok(),
@@ -47,14 +50,16 @@ pub fn parse(query: String) -> ParseOutput {
 /// More efficient than `parse` when you only need to check validity.
 #[napi]
 pub fn validate(query: String) -> DiagnosticList {
-    validate_query(&query)
+    let pipeline = default_pipeline();
+    parse_and_lint(&query, &pipeline).diagnostics
 }
 
 /// Check if a query string is valid (no syntax errors).
 /// Returns true if the query can be parsed without errors.
 #[napi]
 pub fn is_valid(query: String) -> bool {
-    !validate_query(&query).has_errors()
+    let pipeline = default_pipeline();
+    !parse_and_lint(&query, &pipeline).diagnostics.has_errors()
 }
 
 /// Get statistics about a query without returning the full AST.

@@ -132,6 +132,7 @@ pub fn parse_and_lint(source: &str, linters: &LinterPipeline) -> ParseResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::linters::default_pipeline;
 
     #[test]
     fn test_parse_simple_query() {
@@ -154,5 +155,61 @@ mod tests {
         let stats = result.stats.unwrap();
         assert!(stats.has_negation);
         assert!(stats.fields.contains(&"title".to_string()));
+    }
+
+    #[test]
+    fn test_lint_rejects_standalone_wildcard() {
+        let pipeline = default_pipeline();
+        let result = parse_and_lint("*", &pipeline);
+        assert!(result.diagnostics.has_errors());
+        let errors: Vec<_> = result.diagnostics.errors().collect();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code.as_deref(), Some("no-wildcard"));
+    }
+
+    #[test]
+    fn test_lint_rejects_prefix_wildcard() {
+        let pipeline = default_pipeline();
+        let result = parse_and_lint("appl*", &pipeline);
+        assert!(result.diagnostics.has_errors());
+        let errors: Vec<_> = result.diagnostics.errors().collect();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].message.contains("prefix query"));
+    }
+
+    #[test]
+    fn test_lint_rejects_exists_wildcard() {
+        let pipeline = default_pipeline();
+        let result = parse_and_lint("title:*", &pipeline);
+        assert!(result.diagnostics.has_errors());
+        let errors: Vec<_> = result.diagnostics.errors().collect();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code.as_deref(), Some("no-wildcard"));
+    }
+
+    #[test]
+    fn test_lint_allows_normal_query() {
+        let pipeline = default_pipeline();
+        let result = parse_and_lint("apple AND orange", &pipeline);
+        assert!(result.is_ok());
+        assert!(!result.diagnostics.has_errors());
+    }
+
+    #[test]
+    fn test_lint_allows_phrase_query() {
+        let pipeline = default_pipeline();
+        let result = parse_and_lint("\"climate change\" AND policy", &pipeline);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_lint_wildcard_in_complex_query() {
+        let pipeline = default_pipeline();
+        let result = parse_and_lint("apple AND orang*", &pipeline);
+        assert!(result.diagnostics.has_errors());
+        let errors: Vec<_> = result.diagnostics.errors().collect();
+        assert_eq!(errors.len(), 1);
+        // "apple AND orang*" — the * is at byte offset 15 (0-indexed)
+        assert_eq!(errors[0].range.start.offset, 15);
     }
 }
