@@ -6,3 +6,8 @@ package-template.wasi.cjs
 wasi-worker-browser.mjs
 wasi-worker.mjs
 .yarnrc.yml
+pnpm-lock.yaml
+browser.js
+index.d.ts
+query-parser.wasi-browser.js
+query-parser.wasi.cjs
