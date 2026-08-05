@@ -256,7 +256,9 @@ jobs:
       - name: Test bindings
         run: pnpm test
         env:
-          NAPI_RS_FORCE_WASI: 1
+          # index.js no longer falls back to the wasi binding (see
+          # scripts/strip-wasi-fallback.mjs), so load it explicitly
+          NAPI_RS_NATIVE_LIBRARY_PATH: ${{ github.workspace }}/query-parser.wasi.cjs
   publish:
     name: Publish
     runs-on: ubuntu-latest

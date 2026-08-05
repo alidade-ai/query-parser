@@ -525,39 +525,6 @@ function requireNative() {
 
 nativeBinding = requireNative()
 
-if (!nativeBinding || process.env.NAPI_RS_FORCE_WASI) {
-  let wasiBinding = null
-  let wasiBindingError = null
-  try {
-    wasiBinding = require('./query-parser.wasi.cjs')
-    nativeBinding = wasiBinding
-  } catch (err) {
-    if (process.env.NAPI_RS_FORCE_WASI) {
-      wasiBindingError = err
-    }
-  }
-  if (!nativeBinding || process.env.NAPI_RS_FORCE_WASI) {
-    try {
-      wasiBinding = require('@alidade/query-parser-wasm32-wasi')
-      nativeBinding = wasiBinding
-    } catch (err) {
-      if (process.env.NAPI_RS_FORCE_WASI) {
-        if (!wasiBindingError) {
-          wasiBindingError = err
-        } else {
-          wasiBindingError.cause = err
-        }
-        loadErrors.push(err)
-      }
-    }
-  }
-  if (process.env.NAPI_RS_FORCE_WASI === 'error' && !wasiBinding) {
-    const error = new Error('WASI binding not found and NAPI_RS_FORCE_WASI is set to error')
-    error.cause = wasiBindingError
-    throw error
-  }
-}
-
 if (!nativeBinding) {
   if (loadErrors.length > 0) {
     throw new Error(
