@@ -1,6 +1,6 @@
 {
   "name": "@alidade/query-parser",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Fast Tantivy boolean query parser with diagnostics for validation and linting",
   "license": "MIT",
   "repository": {
