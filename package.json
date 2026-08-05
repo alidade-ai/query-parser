@@ -34,10 +34,10 @@
   },
   "scripts": {
     "artifacts": "napi artifacts",
-    "build": "napi build --platform --release && node scripts/strip-wasi-fallback.mjs",
-    "build:debug": "napi build --platform && node scripts/strip-wasi-fallback.mjs",
+    "build": "node scripts/build.mjs --release",
+    "build:debug": "node scripts/build.mjs",
     "prepublishOnly": "napi prepublish -t npm",
-    "preversion": "napi build --platform && node scripts/strip-wasi-fallback.mjs && git add .",
+    "preversion": "node scripts/build.mjs && git add .",
     "version": "napi version",
     "format": "pnpm run format:prettier && pnpm run format:rs && pnpm run format:toml",
     "format:prettier": "prettier . -w",
