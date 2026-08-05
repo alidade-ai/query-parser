@@ -1,5 +1,7 @@
 import test from "ava";
-import { parse, validate, isValid, format } from "../index.js";
+import binding from "./binding.cjs";
+
+const { parse, validate, isValid, format } = binding;
 
 test("parse valid query", (t) => {
   const result = parse("apple OR orange");
