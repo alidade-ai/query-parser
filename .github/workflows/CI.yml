@@ -292,19 +292,19 @@ jobs:
         run: ls -R ./npm
         shell: bash
       - name: Publish
+        # Auth via npm Trusted Publishing (OIDC) — requires npm >= 11.5.1
+        # (node 24 on the runner) and a Trusted Publisher entry on each
+        # @alidade/query-parser* package pointing at this workflow file.
         run: |
-          npm config set provenance true
+          npm --version
           if git log -1 --pretty=%B | grep "^[0-9]\+\.[0-9]\+\.[0-9]\+$";
           then
-            echo "//registry.npmjs.org/:_authToken=$NPM_TOKEN" >> ~/.npmrc
             npm publish --access public
           elif git log -1 --pretty=%B | grep "^[0-9]\+\.[0-9]\+\.[0-9]\+";
           then
-            echo "//registry.npmjs.org/:_authToken=$NPM_TOKEN" >> ~/.npmrc
             npm publish --tag next --access public
           else
             echo "Not a release, skipping publish"
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
