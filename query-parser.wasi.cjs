@@ -113,5 +113,6 @@ module.exports.format = __napiModule.exports.format
 module.exports.getStats = __napiModule.exports.getStats
 module.exports.isValid = __napiModule.exports.isValid
 module.exports.parse = __napiModule.exports.parse
+module.exports.toTsquery = __napiModule.exports.toTsquery
 module.exports.validate = __napiModule.exports.validate
 module.exports.version = __napiModule.exports.version

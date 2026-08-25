@@ -13,8 +13,10 @@ pub enum Occur {
     Must,
     /// Term must not appear (NOT, -)
     MustNot,
-    /// Term should appear (OR, default)
+    /// Term should appear (explicit OR)
     Should,
+    /// No explicit occur (bare term) — resolved by conjunction mode at build time
+    Default,
 }
 
 impl From<Option<TantivyOccur>> for Occur {
@@ -22,7 +24,8 @@ impl From<Option<TantivyOccur>> for Occur {
         match occur {
             Some(TantivyOccur::Must) => Occur::Must,
             Some(TantivyOccur::MustNot) => Occur::MustNot,
-            Some(TantivyOccur::Should) | None => Occur::Should,
+            Some(TantivyOccur::Should) => Occur::Should,
+            None => Occur::Default,
         }
     }
 }

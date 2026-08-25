@@ -548,5 +548,6 @@ module.exports.format = nativeBinding.format
 module.exports.getStats = nativeBinding.getStats
 module.exports.isValid = nativeBinding.isValid
 module.exports.parse = nativeBinding.parse
+module.exports.toTsquery = nativeBinding.toTsquery
 module.exports.validate = nativeBinding.validate
 module.exports.version = nativeBinding.version

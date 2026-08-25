@@ -2,11 +2,13 @@ mod ast;
 mod diagnostics;
 mod linters;
 mod parser;
+mod tsquery;
 
 pub use ast::*;
 pub use diagnostics::*;
 pub use linters::default_pipeline;
 pub use parser::{Linter, LinterPipeline, parse_and_lint, parse_query, validate_query};
+pub use tsquery::{TsExpr, TsqueryOptions, TsqueryOutput, emit_tsquery};
 
 use napi_derive::napi;
 
@@ -91,7 +93,7 @@ fn format_node(node: &QueryNode) -> String {
                     let prefix = match m.occur {
                         Occur::Must => "+",
                         Occur::MustNot => "-",
-                        Occur::Should => "",
+                        Occur::Should | Occur::Default => "",
                     };
                     let inner = format_node(&m.node);
                     if prefix.is_empty() {
@@ -174,6 +176,21 @@ fn format_leaf(leaf: &LeafNode) -> String {
             format!("{}:*", e.field)
         }
     }
+}
+
+/// Transpile a tantivy query string to a Postgres tsquery expression tree.
+///
+/// Parses and lints the query (same pipeline as `parse`), then emits a JSON
+/// expression tree whose leaves are `{field, tsquery}` pairs. Each `tsquery`
+/// string is meant to be passed as the second argument of
+/// `to_tsquery(<config>, $1)` so lexeme normalization (stemming, casing,
+/// stopwords) follows the target column's text-search configuration.
+///
+/// Returns `ok: false` with diagnostics when the query cannot be parsed or
+/// contains untranspilable constructs (wildcards, ranges, unknown fields).
+#[napi]
+pub fn to_tsquery(query: String, options: Option<TsqueryOptions>) -> TsqueryOutput {
+    emit_tsquery(&query, options.unwrap_or_default())
 }
 
 /// Get the version of the parser library

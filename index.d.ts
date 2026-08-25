@@ -98,6 +98,48 @@ export interface Range {
 }
 
 /**
+ * Transpile a tantivy query string to a Postgres tsquery expression tree.
+ *
+ * Parses and lints the query (same pipeline as `parse`), then emits a JSON
+ * expression tree whose leaves are `{field, tsquery}` pairs. Each `tsquery`
+ * string is meant to be passed as the second argument of
+ * `to_tsquery(<config>, $1)` so lexeme normalization (stemming, casing,
+ * stopwords) follows the target column's text-search configuration.
+ *
+ * Returns `ok: false` with diagnostics when the query cannot be parsed or
+ * contains untranspilable constructs (wildcards, ranges, unknown fields).
+ */
+export declare function toTsquery(query: string, options?: TsqueryOptions | undefined | null): TsqueryOutput
+
+/** Options for tsquery emission */
+export interface TsqueryOptions {
+  /** Field assigned to bare (unscoped) terms. Defaults to "content_exact". */
+  defaultField?: string
+  /** If provided, field-scoped terms referencing other fields produce an error. */
+  allowedFields?: Array<string>
+  /** Treat bare adjacent terms as AND (tantivy conjunction_mode). Defaults to true. */
+  conjunctionMode?: boolean
+  /** Maximum phrase slop expanded into `<N>` alternatives. Defaults to 5. */
+  maxSlop?: number
+}
+
+/** Result of transpiling a query to tsquery form */
+export interface TsqueryOutput {
+  /** Whether transpilation succeeded (no error diagnostics) */
+  ok: boolean
+  /**
+   * JSON expression tree (use JSON.parse() in JS). Nodes:
+   * {"type":"match","field":string,"tsquery":string}
+   * {"type":"and","children":[...]} | {"type":"or","children":[...]}
+   * {"type":"not","child":{...}}
+   * The `tsquery` string is intended for `to_tsquery(<config>, $1)`.
+   */
+  expression?: string
+  /** Diagnostics from parsing, linting, and emission */
+  diagnostics: DiagnosticList
+}
+
+/**
  * Validate a tantivy query string and return only diagnostics.
  * More efficient than `parse` when you only need to check validity.
  */
