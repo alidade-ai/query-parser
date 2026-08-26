@@ -51,7 +51,6 @@ struct Emitter<'a> {
     conjunction_mode: bool,
     max_slop: u32,
     diagnostics: DiagnosticList,
-    warned_implicit_and: bool,
 }
 
 pub fn emit_tsquery(source: &str, options: TsqueryOptions) -> TsqueryOutput {
@@ -95,16 +94,36 @@ pub fn emit_tsquery(source: &str, options: TsqueryOptions) -> TsqueryOutput {
         };
     }
 
+    let conjunction_mode = options.conjunction_mode.unwrap_or(true);
+
+    // Bare-space adjacency is warned from the source text so each squiggle
+    // lands on the two adjacent operands instead of the whole query (the
+    // grammar's AST carries no positions).
+    for (start, end) in find_implicit_adjacencies(source) {
+        diagnostics.push(
+            Diagnostic::warning(
+                if conjunction_mode {
+                    "Space-separated terms are combined with AND; \
+                     use an explicit AND to make this clear"
+                } else {
+                    "Space-separated terms are combined with OR; \
+                     use an explicit OR to make this clear"
+                },
+                Range::from_offsets(source, start, end),
+            )
+            .with_code("implicit-operator"),
+        );
+    }
+
     let mut emitter = Emitter {
         source,
         default_field: options
             .default_field
             .unwrap_or_else(|| "content_exact".to_string()),
         allowed_fields: options.allowed_fields,
-        conjunction_mode: options.conjunction_mode.unwrap_or(true),
+        conjunction_mode,
         max_slop: options.max_slop.unwrap_or(5),
         diagnostics: DiagnosticList::new(),
-        warned_implicit_and: false,
     };
 
     let expr = emitter.emit(&ast);
@@ -142,6 +161,15 @@ impl Emitter<'_> {
         Range::from_offsets(self.source, 0, self.source.len())
     }
 
+    // Best-effort localization: the AST carries no positions, so point the
+    // diagnostic at the first occurrence of the offending text.
+    fn range_of(&self, needle: &str) -> Range {
+        match self.source.find(needle) {
+            Some(offset) => Range::from_offsets(self.source, offset, offset + needle.len()),
+            None => self.full_range(),
+        }
+    }
+
     fn emit(&mut self, node: &QueryNode) -> Result<Option<TsExpr>, ()> {
         match node {
             QueryNode::Leaf(leaf) => self.emit_leaf(leaf),
@@ -150,7 +178,7 @@ impl Emitter<'_> {
                 self.diagnostics.push(
                     Diagnostic::warning(
                         "Boost (^) has no effect and is ignored",
-                        self.full_range(),
+                        self.range_of("^"),
                     )
                     .with_code("boost-ignored"),
                 );
@@ -163,26 +191,6 @@ impl Emitter<'_> {
         let mut musts: Vec<TsExpr> = Vec::new();
         let mut shoulds: Vec<TsExpr> = Vec::new();
         let mut must_nots: Vec<TsExpr> = Vec::new();
-
-        if clause.members.len() > 1
-            && clause.members.iter().any(|m| m.occur == Occur::Default)
-            && !self.warned_implicit_and
-        {
-            self.warned_implicit_and = true;
-            self.diagnostics.push(
-                Diagnostic::warning(
-                    if self.conjunction_mode {
-                        "Space-separated terms are combined with AND; \
-                         use an explicit AND to make this clear"
-                    } else {
-                        "Space-separated terms are combined with OR; \
-                         use an explicit OR to make this clear"
-                    },
-                    self.full_range(),
-                )
-                .with_code("implicit-operator"),
-            );
-        }
 
         for member in &clause.members {
             let effective = match member.occur {
@@ -232,13 +240,9 @@ impl Emitter<'_> {
             if must_nots.is_empty() {
                 return Ok(None);
             }
-            self.diagnostics.push(
-                Diagnostic::warning(
-                    "Negation-only query: matches every post except the excluded terms",
-                    self.full_range(),
-                )
-                .with_code("negation-only"),
-            );
+            // Negation-only groups emit `!(…)` (everything-except). Under
+            // tantivy these silently matched nothing; the divergence is
+            // deliberate and matches the obvious intent, so it is not warned.
             let negated = must_nots.into_iter().map(not_wrap).collect();
             return Ok(Some(merge(negated, Op::And)));
         }
@@ -332,6 +336,11 @@ impl Emitter<'_> {
                 .collect();
             format!("({})", alternatives.join(" | "))
         } else {
+            let needle = format!("\"{}\"~{}", lit.phrase, lit.slop);
+            let range = match self.source.find(&needle) {
+                Some(offset) => Range::from_offsets(self.source, offset, offset + needle.len()),
+                None => self.range_of(&format!("~{}", lit.slop)),
+            };
             self.diagnostics.push(
                 Diagnostic::error(
                     if words.len() > 2 {
@@ -345,7 +354,7 @@ impl Emitter<'_> {
                             lit.slop, self.max_slop
                         )
                     },
-                    self.full_range(),
+                    range,
                 )
                 .with_code("slop-unsupported"),
             );
@@ -361,8 +370,11 @@ impl Emitter<'_> {
             && !allowed.contains(&field)
         {
             self.diagnostics.push(
-                Diagnostic::error(format!("Unknown field \"{field}\""), self.full_range())
-                    .with_code("unknown-field"),
+                Diagnostic::error(
+                    format!("Unknown field \"{field}\""),
+                    self.range_of(&format!("{field}:")),
+                )
+                .with_code("unknown-field"),
             );
             return Err(());
         }
@@ -475,6 +487,143 @@ fn quote_lexeme(word: &str) -> String {
 
 /// Scan the raw source for AND and OR keywords appearing at the same paren
 /// depth. Returns the byte offset of the second operator kind if found.
+/// Source-level scan for bare-space adjacency: two operands (terms, quoted
+/// phrases, or parenthesized groups) with no operator keyword between them.
+/// Returns one `(start, end)` span per gap, covering both adjacent operands,
+/// so warnings land on the offending spot instead of the whole query.
+/// Operands with an explicit `+`/`-` occur prefix on both sides don't count —
+/// the operator is explicit there.
+fn find_implicit_adjacencies(source: &str) -> Vec<(usize, usize)> {
+    #[derive(Clone, Copy)]
+    struct Operand {
+        start: usize,
+        bare: bool,
+    }
+
+    let bytes = source.as_bytes();
+    let mut gaps: Vec<(usize, usize)> = Vec::new();
+    // (start, bare) of the previous completed operand at the current depth
+    let mut prev: Option<Operand> = None;
+    // stack of `prev` values for enclosing paren levels + the group start
+    let mut stack: Vec<(Option<Operand>, usize, bool)> = Vec::new();
+    // a dangling `field:` or `+`/`-` prefix waiting for its operand
+    let mut pending_prefix: Option<usize> = None;
+    let mut pending_signed = false;
+    let mut i = 0;
+
+    let complete =
+        |prev: &mut Option<Operand>, gaps: &mut Vec<(usize, usize)>, op: Operand, end: usize| {
+            if let Some(p) = *prev
+                && (p.bare || op.bare)
+            {
+                gaps.push((p.start, end));
+            }
+            *prev = Some(op);
+        };
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b.is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        match b {
+            b'"' | b'\'' if b == b'"' || i == 0 || bytes[i - 1].is_ascii_whitespace() => {
+                let quote = b;
+                let start = pending_prefix.take().unwrap_or(i);
+                let bare = !pending_signed;
+                pending_signed = false;
+                i += 1;
+                while i < bytes.len() && bytes[i] != quote {
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    i += 1;
+                }
+                if i < bytes.len() && bytes[i] == b'~' {
+                    i += 1;
+                    while i < bytes.len() && bytes[i].is_ascii_digit() {
+                        i += 1;
+                    }
+                }
+                complete(&mut prev, &mut gaps, Operand { start, bare }, i);
+            }
+            b'(' => {
+                let start = pending_prefix.take().unwrap_or(i);
+                let bare = !pending_signed;
+                pending_signed = false;
+                stack.push((prev, start, bare));
+                prev = None;
+                i += 1;
+            }
+            b')' => {
+                if let Some((outer, start, bare)) = stack.pop() {
+                    prev = outer;
+                    complete(&mut prev, &mut gaps, Operand { start, bare }, i + 1);
+                }
+                i += 1;
+            }
+            b'[' => {
+                // set/range bracket blocks are their own syntax; skip wholesale
+                while i < bytes.len() && bytes[i] != b']' {
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    i += 1;
+                }
+                prev = None;
+            }
+            _ => {
+                let start = i;
+                while i < bytes.len()
+                    && !bytes[i].is_ascii_whitespace()
+                    && bytes[i] != b'('
+                    && bytes[i] != b')'
+                    && bytes[i] != b'"'
+                    && bytes[i] != b'['
+                {
+                    i += 1;
+                }
+                let token = &source[start..i];
+                match token {
+                    "AND" | "OR" | "NOT" | "TO" | "IN" => {
+                        prev = None;
+                        pending_prefix = None;
+                        pending_signed = false;
+                    }
+                    "+" | "-" => {
+                        pending_signed = true;
+                        pending_prefix.get_or_insert(start);
+                    }
+                    _ if token.ends_with(':')
+                        && i < bytes.len()
+                        && (bytes[i] == b'"' || bytes[i] == b'(') =>
+                    {
+                        // field prefix attached to a following quote/group
+                        pending_prefix.get_or_insert(start);
+                    }
+                    _ => {
+                        let opstart = pending_prefix.take().unwrap_or(start);
+                        let signed =
+                            pending_signed || token.starts_with('+') || token.starts_with('-');
+                        pending_signed = false;
+                        complete(
+                            &mut prev,
+                            &mut gaps,
+                            Operand {
+                                start: opstart,
+                                bare: !signed,
+                            },
+                            i,
+                        );
+                    }
+                }
+            }
+        }
+    }
+    gaps
+}
+
 fn find_mixed_and_or(source: &str) -> Option<usize> {
     #[derive(Default, Clone, Copy)]
     struct Seen {
@@ -758,17 +907,79 @@ mod tests {
     }
 
     #[test]
-    fn negation_only_query_warns_but_emits() {
+    fn negation_only_query_emits_without_warning() {
         let out = emit("NOT apple");
         assert!(out.ok);
-        assert!(
-            out.diagnostics
-                .items
-                .iter()
-                .any(|d| d.code.as_deref() == Some("negation-only"))
-        );
+        assert!(out.diagnostics.items.is_empty());
         let expr = expression(&out);
         assert_eq!(match_parts(&expr), ("content_exact", "!('apple')"));
+    }
+
+    #[test]
+    fn negation_only_group_inside_or_emits_without_warning() {
+        let out = emit("(apple NOT (banana OR cherry)) OR mango");
+        assert!(out.ok);
+        assert!(out.diagnostics.items.is_empty());
+    }
+
+    #[test]
+    fn implicit_warning_is_localized_to_the_gap() {
+        let source = r#"alpha OR "chat bot" "frontier model" OR beta"#;
+        let out = emit(source);
+        let warnings: Vec<_> = out
+            .diagnostics
+            .items
+            .iter()
+            .filter(|d| d.code.as_deref() == Some("implicit-operator"))
+            .collect();
+        assert_eq!(warnings.len(), 1);
+        let range = &warnings[0].range;
+        let start = source.find(r#""chat bot""#).unwrap();
+        let end = source.find(r#""frontier model""#).unwrap() + r#""frontier model""#.len();
+        assert_eq!(range.start.offset, start as u32);
+        assert_eq!(range.end.offset, end as u32);
+    }
+
+    #[test]
+    fn each_adjacency_gap_warns_separately() {
+        let out = emit("alpha beta gamma");
+        let count = out
+            .diagnostics
+            .items
+            .iter()
+            .filter(|d| d.code.as_deref() == Some("implicit-operator"))
+            .count();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn explicit_not_adjacency_does_not_warn() {
+        let out = emit("apple NOT banana");
+        assert!(out.ok);
+        assert!(out.diagnostics.items.is_empty());
+    }
+
+    #[test]
+    fn signed_operands_do_not_warn() {
+        let out = emit("+apple +banana");
+        assert!(out.ok);
+        assert!(out.diagnostics.items.is_empty());
+    }
+
+    #[test]
+    fn slop_error_is_localized() {
+        let source = r#"apple AND "one two three"~2"#;
+        let out = emit(source);
+        assert!(!out.ok);
+        let diag = out
+            .diagnostics
+            .items
+            .iter()
+            .find(|d| d.code.as_deref() == Some("slop-unsupported"))
+            .unwrap();
+        let start = source.find(r#""one two three"~2"#).unwrap();
+        assert_eq!(diag.range.start.offset, start as u32);
+        assert_eq!(diag.range.end.offset, source.len() as u32);
     }
 
     #[test]
