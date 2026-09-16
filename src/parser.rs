@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use crate::ast::{QueryNode, QueryStats};
 use crate::diagnostics::{Diagnostic, DiagnosticList, Range};
 
@@ -22,7 +24,7 @@ impl ParseResult {
 /// Uses lenient parsing to provide as much information as possible
 /// even when the query has errors.
 pub fn parse_query(source: &str) -> ParseResult {
-    let (ast, errors) = tantivy_query_grammar::parse_query_lenient(source);
+    let (ast, errors) = tantivy_query_grammar::parse_query_lenient(&normalize_whitespace(source));
 
     let mut diagnostics = DiagnosticList::new();
 
@@ -42,6 +44,25 @@ pub fn parse_query(source: &str) -> ParseResult {
         ast: Some(query_node),
         diagnostics,
         stats: Some(stats),
+    }
+}
+
+/// The grammar only recognises operators as `AND ` / `OR ` (a literal space),
+/// so a newline or tab after one silently turns it into a search term. Map
+/// every ASCII whitespace byte to a space before parsing. The mapping is
+/// byte-for-byte, so grammar error offsets stay valid against the original
+/// source; positions are always computed from the original so line/column
+/// survive for multi-line editors.
+pub(crate) fn normalize_whitespace(source: &str) -> Cow<'_, str> {
+    if source.bytes().any(|b| b != b' ' && b.is_ascii_whitespace()) {
+        Cow::Owned(
+            source
+                .chars()
+                .map(|c| if c.is_ascii_whitespace() { ' ' } else { c })
+                .collect(),
+        )
+    } else {
+        Cow::Borrowed(source)
     }
 }
 
@@ -200,6 +221,26 @@ mod tests {
         let pipeline = default_pipeline();
         let result = parse_and_lint("\"climate change\" AND policy", &pipeline);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_operator_followed_by_newline_is_still_an_operator() {
+        for sep in ["\n", "\r\n", "\t", "\n\n"] {
+            let result = parse_query(&format!("apple AND{sep}orange"));
+            assert!(result.is_ok(), "sep {sep:?}");
+            assert_eq!(result.stats.unwrap().term_count, 2, "sep {sep:?}");
+        }
+    }
+
+    #[test]
+    fn test_lint_rejects_bare_operator() {
+        let pipeline = default_pipeline();
+        let result = parse_and_lint("apple AND", &pipeline);
+        let errors: Vec<_> = result.diagnostics.errors().collect();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code.as_deref(), Some("bare-operator"));
+        assert_eq!(errors[0].range.start.offset, 6);
+        assert_eq!(errors[0].range.end.offset, 9);
     }
 
     #[test]

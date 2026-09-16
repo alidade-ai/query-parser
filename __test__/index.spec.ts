@@ -60,3 +60,34 @@ test("toTsquery rejects wildcard queries", (t) => {
   t.false(result.ok);
   t.is(result.expression, undefined);
 });
+
+test("toTsquery treats AND/OR followed by a newline, CRLF, or tab as operators", (t) => {
+  for (const sep of ["\n", "\r\n", "\t"]) {
+    const and = toTsquery(`(test OR test)${sep}AND${sep}(testing OR testing)`);
+    t.true(and.ok, JSON.stringify(sep));
+    t.is(and.diagnostics.items.length, 0, JSON.stringify(sep));
+    t.is(
+      JSON.parse(and.expression ?? "").tsquery,
+      "('test' | 'test') & ('testing' | 'testing')",
+      JSON.stringify(sep),
+    );
+
+    const or = toTsquery(`apple OR${sep}banana`);
+    t.true(or.ok, JSON.stringify(sep));
+    t.is(
+      JSON.parse(or.expression ?? "").tsquery,
+      "'apple' | 'banana'",
+      JSON.stringify(sep),
+    );
+  }
+});
+
+test("bare AND/OR is reported as an error at the operator", (t) => {
+  const result = toTsquery("apple AND");
+  t.false(result.ok);
+  const [error] = result.diagnostics.items;
+  t.is(error?.code, "bare-operator");
+  t.is(error?.range.start.offset, 6);
+  t.is(error?.range.end.offset, 9);
+  t.false(isValid("OR banana"));
+});

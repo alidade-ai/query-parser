@@ -751,6 +751,88 @@ mod tests {
     }
 
     #[test]
+    fn operators_followed_by_newline_tab_or_crlf_still_bind() {
+        for sep in ["\n", "\t", "\r\n", "\n\n", " \n "] {
+            let out = emit(&format!("(test OR test){sep}AND{sep}(testing OR testing)"));
+            let expr = expression(&out);
+            assert_eq!(
+                match_parts(&expr),
+                (
+                    "content_exact",
+                    "('test' | 'test') & ('testing' | 'testing')"
+                ),
+                "sep {sep:?}"
+            );
+            assert!(out.diagnostics.items.is_empty(), "sep {sep:?}");
+
+            let out = emit(&format!("apple OR{sep}banana"));
+            let expr = expression(&out);
+            assert_eq!(
+                match_parts(&expr),
+                ("content_exact", "'apple' | 'banana'"),
+                "sep {sep:?}"
+            );
+            assert!(out.diagnostics.items.is_empty(), "sep {sep:?}");
+        }
+    }
+
+    #[test]
+    fn diagnostics_keep_original_line_and_column() {
+        let out = emit("apple AND\nbanana cherry");
+        let warning = out
+            .diagnostics
+            .items
+            .iter()
+            .find(|d| d.code.as_deref() == Some("implicit-operator"))
+            .expect("implicit-operator warning");
+        assert_eq!(warning.range.start.line, 1);
+        assert_eq!(warning.range.start.column, 0);
+        assert_eq!(warning.range.start.offset, 10);
+        assert_eq!(warning.range.end.offset, 23);
+    }
+
+    #[test]
+    fn bare_operators_are_errors_with_local_ranges() {
+        for (query, start, end) in [
+            ("apple AND", 6, 9),
+            ("apple AND OR banana", 10, 12),
+            ("(apple OR) AND banana", 7, 9),
+        ] {
+            let out = emit(query);
+            assert!(!out.ok, "{query:?}");
+            let errors: Vec<_> = out
+                .diagnostics
+                .items
+                .iter()
+                .filter(|d| d.code.as_deref() == Some("bare-operator"))
+                .collect();
+            assert_eq!(errors.len(), 1, "{query:?}: {:?}", out.diagnostics.items);
+            assert_eq!(errors[0].range.start.offset, start, "{query:?}");
+            assert_eq!(errors[0].range.end.offset, end, "{query:?}");
+        }
+    }
+
+    #[test]
+    fn leading_operator_is_a_grammar_error() {
+        let out = emit("OR banana");
+        assert!(!out.ok);
+        assert!(
+            out.diagnostics
+                .items
+                .iter()
+                .any(|d| d.code.as_deref() == Some("parse-error"))
+        );
+    }
+
+    #[test]
+    fn lowercase_and_quoted_operator_words_are_plain_terms() {
+        let out = emit("rock and roll");
+        assert!(out.ok, "{:?}", out.diagnostics.items);
+        let out = emit("\"AND\" OR banana");
+        assert!(out.ok, "{:?}", out.diagnostics.items);
+    }
+
+    #[test]
     fn explicit_operators_do_not_warn() {
         let out = emit("apple AND banana");
         assert!(out.ok);
