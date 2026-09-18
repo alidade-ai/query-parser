@@ -1,196 +1,90 @@
 mod ast;
 mod diagnostics;
-mod linters;
+mod format;
+mod lexer;
+mod lint;
 mod parser;
-mod tsquery;
+mod tinql;
 
 pub use ast::*;
 pub use diagnostics::*;
-pub use linters::default_pipeline;
-pub use parser::{Linter, LinterPipeline, parse_and_lint, parse_query, validate_query};
-pub use tsquery::{TsExpr, TsqueryOptions, TsqueryOutput, emit_tsquery};
+pub use format::format_node;
+pub use lint::{LintOptions, lint};
+pub use parser::{ImplicitOp, Parsed, parse as parse_query};
+pub use tinql::{Analysis, TinqlOptions, TinqlOutput, analyze, to_tinql as emit_tinql};
 
 use napi_derive::napi;
 
 /// Result of parsing a query, exposed to JavaScript
 #[napi(object)]
 pub struct ParseOutput {
-    /// Whether parsing was successful (no errors)
+    /// Whether the query is valid (no error diagnostics)
     pub ok: bool,
-    /// The parsed AST as JSON (use JSON.parse() in JS to get the typed object)
+    /// The syntax tree as JSON (use JSON.parse() in JS); nodes carry byte spans
     pub ast: Option<String>,
-    /// List of diagnostics
+    /// Diagnostics from parsing, linting and emission checks, ordered by position
     pub diagnostics: DiagnosticList,
     /// Query statistics
     pub stats: Option<QueryStats>,
 }
 
-/// Parse a tantivy query string.
+/// Parse and lint a boolean query.
 ///
-/// Returns a ParseOutput containing:
-/// - `ok`: whether parsing succeeded without errors
-/// - `ast`: the parsed AST as a JSON string
-/// - `diagnostics`: array of diagnostic messages with positions
-/// - `stats`: statistics about the query
+/// Runs the same pipeline as `toTinql`, so a query that parses here is
+/// guaranteed to transpile.
 #[napi]
-pub fn parse(query: String) -> ParseOutput {
-    let pipeline = default_pipeline();
-    let result = parse_and_lint(&query, &pipeline);
-
+pub fn parse(query: String, options: Option<TinqlOptions>) -> ParseOutput {
+    let analysis = analyze(&query, &options.unwrap_or_default());
     ParseOutput {
-        ok: result.is_ok(),
-        ast: result
+        ok: analysis.is_ok(),
+        ast: analysis
             .ast
             .as_ref()
             .map(|ast| serde_json::to_string(ast).unwrap_or_else(|_| "null".to_string())),
-        diagnostics: result.diagnostics,
-        stats: result.stats,
+        diagnostics: analysis.diagnostics,
+        stats: analysis.stats,
     }
 }
 
-/// Validate a tantivy query string and return only diagnostics.
-/// More efficient than `parse` when you only need to check validity.
+/// Validate a boolean query and return only diagnostics.
 #[napi]
-pub fn validate(query: String) -> DiagnosticList {
-    let pipeline = default_pipeline();
-    parse_and_lint(&query, &pipeline).diagnostics
+pub fn validate(query: String, options: Option<TinqlOptions>) -> DiagnosticList {
+    analyze(&query, &options.unwrap_or_default()).diagnostics
 }
 
-/// Check if a query string is valid (no syntax errors).
-/// Returns true if the query can be parsed without errors.
+/// Check if a query string is valid (no error diagnostics).
 #[napi]
-pub fn is_valid(query: String) -> bool {
-    let pipeline = default_pipeline();
-    !parse_and_lint(&query, &pipeline).diagnostics.has_errors()
+pub fn is_valid(query: String, options: Option<TinqlOptions>) -> bool {
+    analyze(&query, &options.unwrap_or_default()).is_ok()
 }
 
 /// Get statistics about a query without returning the full AST.
 #[napi]
-pub fn get_stats(query: String) -> Option<QueryStats> {
-    parse_query(&query).stats
+pub fn get_stats(query: String, options: Option<TinqlOptions>) -> Option<QueryStats> {
+    analyze(&query, &options.unwrap_or_default()).stats
 }
 
-/// Format a parsed AST back to a query string (normalized form).
-/// Returns None if the query cannot be parsed.
+/// Rewrite a query in canonical form: explicit AND/OR/NOT, original grouping.
+/// Returns null when the query has errors.
 #[napi]
-pub fn format(query: String) -> Option<String> {
-    let result = parse_query(&query);
-    if result.is_ok() {
-        result.ast.map(|ast| format_node(&ast))
+pub fn format(query: String, options: Option<TinqlOptions>) -> Option<String> {
+    let analysis = analyze(&query, &options.unwrap_or_default());
+    if analysis.is_ok() {
+        analysis.ast.map(|ast| format_node(&ast))
     } else {
         None
     }
 }
 
-fn format_node(node: &QueryNode) -> String {
-    match node {
-        QueryNode::Leaf(leaf) => format_leaf(leaf),
-        QueryNode::Clause(clause) => {
-            let parts: Vec<String> = clause
-                .members
-                .iter()
-                .map(|m| {
-                    let prefix = match m.occur {
-                        Occur::Must => "+",
-                        Occur::MustNot => "-",
-                        Occur::Should | Occur::Default => "",
-                    };
-                    let inner = format_node(&m.node);
-                    if prefix.is_empty() {
-                        inner
-                    } else {
-                        format!("{}{}", prefix, inner)
-                    }
-                })
-                .collect();
-            if parts.len() == 1 {
-                parts.into_iter().next().unwrap()
-            } else {
-                format!("({})", parts.join(" "))
-            }
-        }
-        QueryNode::Boost { factor, node } => {
-            format!("{}^{}", format_node(node), factor)
-        }
-    }
-}
-
-fn format_leaf(leaf: &LeafNode) -> String {
-    match leaf {
-        LeafNode::Literal(lit) => {
-            let mut s = String::new();
-            if let Some(field) = &lit.field {
-                s.push_str(field);
-                s.push(':');
-            }
-            if lit.phrase.contains(' ') || lit.delimiter != Delimiter::None {
-                s.push('"');
-                s.push_str(&lit.phrase);
-                s.push('"');
-            } else {
-                s.push_str(&lit.phrase);
-            }
-            if lit.slop > 0 {
-                s.push('~');
-                s.push_str(&lit.slop.to_string());
-            }
-            if lit.prefix {
-                s.push('*');
-            }
-            s
-        }
-        LeafNode::All => "*".to_string(),
-        LeafNode::Range(r) => {
-            let mut s = String::new();
-            if let Some(field) = &r.field {
-                s.push_str(field);
-                s.push(':');
-            }
-            s.push(match r.lower.bound_type {
-                BoundType::Inclusive => '[',
-                BoundType::Exclusive => '{',
-                BoundType::Unbounded => '[',
-            });
-            s.push_str(r.lower.value.as_deref().unwrap_or("*"));
-            s.push_str(" TO ");
-            s.push_str(r.upper.value.as_deref().unwrap_or("*"));
-            s.push(match r.upper.bound_type {
-                BoundType::Inclusive => ']',
-                BoundType::Exclusive => '}',
-                BoundType::Unbounded => ']',
-            });
-            s
-        }
-        LeafNode::Set(set) => {
-            let mut s = String::new();
-            if let Some(field) = &set.field {
-                s.push_str(field);
-                s.push(':');
-            }
-            s.push_str("IN [");
-            s.push_str(&set.elements.join(" "));
-            s.push(']');
-            s
-        }
-        LeafNode::Exists(e) => {
-            format!("{}:*", e.field)
-        }
-    }
-}
-
-/// Transpile a tantivy query string to a Postgres tsquery expression tree.
+/// Transpile a boolean query to a TINQL string for `content ==> $1`.
 ///
-/// Parses and lints the query (same pipeline as `parse`), then emits a JSON
-/// expression tree whose leaves are `{field, tsquery}` pairs. Each `tsquery`
-/// string is meant to be passed as the second argument of
-/// `to_tsquery(<config>, $1)` so lexeme normalization (stemming, casing,
-/// stopwords) follows the target column's text-search configuration.
-///
-/// Returns `ok: false` with diagnostics when the query cannot be parsed or
-/// contains untranspilable constructs (wildcards, ranges, unknown fields).
+/// Parses and lints the query (same pipeline as `parse`), then emits one
+/// TINQL string with explicit parentheses, `AND NOT` for negation and
+/// `* AND NOT (…)` for negation-only queries. Returns `ok: false` with
+/// diagnostics when the query has any error.
 #[napi]
-pub fn to_tsquery(query: String, options: Option<TsqueryOptions>) -> TsqueryOutput {
-    emit_tsquery(&query, options.unwrap_or_default())
+pub fn to_tinql(query: String, options: Option<TinqlOptions>) -> TinqlOutput {
+    emit_tinql(&query, &options.unwrap_or_default())
 }
 
 /// Get the version of the parser library

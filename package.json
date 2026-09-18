@@ -1,7 +1,7 @@
 {
   "name": "@alidade/query-parser",
   "version": "0.3.2",
-  "description": "Fast Tantivy boolean query parser with diagnostics for validation and linting",
+  "description": "Boolean search query parser, linter and TINQL emitter with editor-friendly diagnostics",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -44,7 +44,8 @@
     "format:toml": "tombi format",
     "format:rs": "cargo fmt",
     "lint": "oxlint .",
-    "test": "ava"
+    "test": "ava",
+    "test:tin": "PGPASSWORD=lead TIN_PSQL=\"psql -h 127.0.0.1 -p 5499 -U lead -d lead\" ava"
   },
   "devDependencies": {
     "@emnapi/core": "^1.9.0",

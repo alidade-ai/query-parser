@@ -1,0 +1,20 @@
+FROM docker.io/pgvector/pgvector:pg18 AS build
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential clang libclang-dev pkg-config curl ca-certificates git \
+      libssl-dev libreadline-dev zlib1g-dev postgresql-server-dev-18 \
+    && rm -rf /var/lib/apt/lists/*
+ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
+RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+ARG LEAD_REF=main
+RUN git clone --depth 1 --branch ${LEAD_REF} https://github.com/planetscale/lead.git /src/lead
+WORKDIR /src/lead
+RUN rustup show active-toolchain || rustup toolchain install
+RUN cargo install cargo-pgrx --version 0.19.1 --locked
+RUN cargo pgrx init --pg18=/usr/lib/postgresql/18/bin/pg_config
+RUN cargo pgrx install --release --package tin --no-default-features --features pg18 \
+      --pg-config /usr/lib/postgresql/18/bin/pg_config
+
+FROM docker.io/pgvector/pgvector:pg18
+COPY --from=build /usr/lib/postgresql/18/lib/tin.so /usr/lib/postgresql/18/lib/tin.so
+COPY --from=build /usr/share/postgresql/18/extension/tin* /usr/share/postgresql/18/extension/

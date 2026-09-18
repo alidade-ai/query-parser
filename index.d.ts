@@ -5,8 +5,10 @@ export interface Diagnostic {
   message: string
   severity: DiagnosticSeverity
   range: Range
+  /** Stable machine-readable rule id (e.g. `mixed-and-or`) */
   code?: string
   source?: string
+  /** Longer explanation or a suggested fix */
   relatedInfo?: string
 }
 
@@ -23,38 +25,32 @@ export declare const enum DiagnosticSeverity {
 }
 
 /**
- * Format a parsed AST back to a query string (normalized form).
- * Returns None if the query cannot be parsed.
+ * Rewrite a query in canonical form: explicit AND/OR/NOT, original grouping.
+ * Returns null when the query has errors.
  */
-export declare function format(query: string): string | null
+export declare function format(query: string, options?: TinqlOptions | undefined | null): string | null
 
 /** Get statistics about a query without returning the full AST. */
-export declare function getStats(query: string): QueryStats | null
+export declare function getStats(query: string, options?: TinqlOptions | undefined | null): QueryStats | null
+
+/** Check if a query string is valid (no error diagnostics). */
+export declare function isValid(query: string, options?: TinqlOptions | undefined | null): boolean
 
 /**
- * Check if a query string is valid (no syntax errors).
- * Returns true if the query can be parsed without errors.
- */
-export declare function isValid(query: string): boolean
-
-/**
- * Parse a tantivy query string.
+ * Parse and lint a boolean query.
  *
- * Returns a ParseOutput containing:
- * - `ok`: whether parsing succeeded without errors
- * - `ast`: the parsed AST as a JSON string
- * - `diagnostics`: array of diagnostic messages with positions
- * - `stats`: statistics about the query
+ * Runs the same pipeline as `toTinql`, so a query that parses here is
+ * guaranteed to transpile.
  */
-export declare function parse(query: string): ParseOutput
+export declare function parse(query: string, options?: TinqlOptions | undefined | null): ParseOutput
 
 /** Result of parsing a query, exposed to JavaScript */
 export interface ParseOutput {
-  /** Whether parsing was successful (no errors) */
+  /** Whether the query is valid (no error diagnostics) */
   ok: boolean
-  /** The parsed AST as JSON (use JSON.parse() in JS to get the typed object) */
+  /** The syntax tree as JSON (use JSON.parse() in JS); nodes carry byte spans */
   ast?: string
-  /** List of diagnostics */
+  /** Diagnostics from parsing, linting and emission checks, ordered by position */
   diagnostics: DiagnosticList
   /** Query statistics */
   stats?: QueryStats
@@ -64,20 +60,18 @@ export interface ParseOutput {
 export interface Position {
   /** Line number (0-indexed) */
   line: number
-  /** Column number (0-indexed) */
+  /** Column within the line in UTF-16 code units (0-indexed), as editors count it */
   column: number
-  /** Byte offset in the source string */
+  /** Byte offset in the UTF-8 source string */
   offset: number
 }
 
 /** Summary statistics about a parsed query */
 export interface QueryStats {
-  /** Total number of terms */
+  /** Number of terms and phrases */
   termCount: number
   /** Maximum nesting depth */
   maxDepth: number
-  /** Fields referenced in the query */
-  fields: Array<string>
   /** Whether the query contains a match-all (*) */
   hasMatchAll: boolean
   /** Whether the query contains any boosted terms */
@@ -86,8 +80,12 @@ export interface QueryStats {
   hasNegation: boolean
   /** Whether the query contains any phrase queries */
   hasPhrase: boolean
-  /** Whether the query contains any range queries */
-  hasRange: boolean
+  /** Whether the query contains any wildcard terms */
+  hasWildcard: boolean
+  /** Whether the query contains any fuzzy terms */
+  hasFuzzy: boolean
+  /** Whether the query contains any NEAR/THEN proximity operators */
+  hasProximity: boolean
 }
 
 export interface Range {
@@ -97,53 +95,38 @@ export interface Range {
   end: Position
 }
 
-/**
- * Transpile a tantivy query string to a Postgres tsquery expression tree.
- *
- * Parses and lints the query (same pipeline as `parse`), then emits a JSON
- * expression tree whose leaves are `{field, tsquery}` pairs. Each `tsquery`
- * string is meant to be passed as the second argument of
- * `to_tsquery(<config>, $1)` so lexeme normalization (stemming, casing,
- * stopwords) follows the target column's text-search configuration.
- *
- * Returns `ok: false` with diagnostics when the query cannot be parsed or
- * contains untranspilable constructs (wildcards, ranges, unknown fields).
- */
-export declare function toTsquery(query: string, options?: TsqueryOptions | undefined | null): TsqueryOutput
-
-/** Options for tsquery emission */
-export interface TsqueryOptions {
-  /** Field assigned to bare (unscoped) terms. Defaults to "content_exact". */
-  defaultField?: string
-  /** If provided, field-scoped terms referencing other fields produce an error. */
-  allowedFields?: Array<string>
-  /** Treat bare adjacent terms as AND (tantivy conjunction_mode). Defaults to true. */
+/** Options for analysis and TINQL emission */
+export interface TinqlOptions {
+  /** Treat bare adjacent terms as AND (true, default) or OR (false). */
   conjunctionMode?: boolean
-  /** Maximum phrase slop expanded into `<N>` alternatives. Defaults to 5. */
+  /** Maximum phrase proximity `"a b"~N`. Defaults to 20. */
   maxSlop?: number
+  /** Maximum fuzzy edit distance `term~N`. Defaults to 2. */
+  maxFuzzyDistance?: number
 }
 
-/** Result of transpiling a query to tsquery form */
-export interface TsqueryOutput {
+/** Result of transpiling a query to TINQL */
+export interface TinqlOutput {
   /** Whether transpilation succeeded (no error diagnostics) */
   ok: boolean
-  /**
-   * JSON expression tree (use JSON.parse() in JS). Nodes:
-   * {"type":"match","field":string,"tsquery":string}
-   * {"type":"and","children":[...]} | {"type":"or","children":[...]}
-   * {"type":"not","child":{...}}
-   * The `tsquery` string is intended for `to_tsquery(<config>, $1)`.
-   */
-  expression?: string
+  /** The TINQL string for `content ==> $1`, present only when `ok` */
+  tinql?: string
   /** Diagnostics from parsing, linting, and emission */
   diagnostics: DiagnosticList
 }
 
 /**
- * Validate a tantivy query string and return only diagnostics.
- * More efficient than `parse` when you only need to check validity.
+ * Transpile a boolean query to a TINQL string for `content ==> $1`.
+ *
+ * Parses and lints the query (same pipeline as `parse`), then emits one
+ * TINQL string with explicit parentheses, `AND NOT` for negation and
+ * `* AND NOT (…)` for negation-only queries. Returns `ok: false` with
+ * diagnostics when the query has any error.
  */
-export declare function validate(query: string): DiagnosticList
+export declare function toTinql(query: string, options?: TinqlOptions | undefined | null): TinqlOutput
+
+/** Validate a boolean query and return only diagnostics. */
+export declare function validate(query: string, options?: TinqlOptions | undefined | null): DiagnosticList
 
 /** Get the version of the parser library */
 export declare function version(): string

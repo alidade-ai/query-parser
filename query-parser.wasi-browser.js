@@ -61,6 +61,6 @@ export const format = __napiModule.exports.format
 export const getStats = __napiModule.exports.getStats
 export const isValid = __napiModule.exports.isValid
 export const parse = __napiModule.exports.parse
-export const toTsquery = __napiModule.exports.toTsquery
+export const toTinql = __napiModule.exports.toTinql
 export const validate = __napiModule.exports.validate
 export const version = __napiModule.exports.version

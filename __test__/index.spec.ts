@@ -1,93 +1,132 @@
 import test from "ava";
 import binding from "./binding.cjs";
 
-const { parse, validate, isValid, format, toTsquery } = binding;
+const { parse, validate, isValid, format, getStats, toTinql } = binding;
+
+const codes = (query: string) =>
+  validate(query).items.map((d: { code?: string }) => d.code);
 
 test("parse valid query", (t) => {
   const result = parse("apple OR orange");
   t.true(result.ok);
   t.is(result.diagnostics.items.length, 0);
   t.is(result.stats?.termCount, 2);
+  const ast = JSON.parse(result.ast ?? "null");
+  t.is(ast.type, "or");
+  t.deepEqual(ast.children[1].span, { start: 9, end: 15 });
 });
 
 test("parse invalid query", (t) => {
-  const result = parse("title:");
+  const result = parse("apple AND");
   t.false(result.ok);
-  t.true(result.diagnostics.items.length > 0);
-  t.is(result.diagnostics.items[0]?.message, "expected word");
+  t.is(result.diagnostics.items[0]?.code, "bare-operator");
+  t.is(result.diagnostics.items[0]?.message, "AND has no search term after it");
 });
 
 test("isValid", (t) => {
   t.true(isValid("foo AND bar"));
-  t.false(isValid("field:"));
+  t.false(isValid("(foo"));
+  t.false(isValid("OR banana"));
+  t.false(isValid("foo AND bar OR baz"));
 });
 
 test("format normalizes query", (t) => {
-  t.is(format("foo"), "foo");
+  t.is(format("foo bar"), "foo AND bar");
+  t.is(format("foo -bar"), "foo AND NOT bar");
+  t.is(format("(foo"), null);
 });
 
 test("validate returns diagnostics", (t) => {
-  t.is(validate("foo AND bar").items.length, 0);
-  t.true(validate("field:").items.length > 0);
+  t.deepEqual(codes("foo AND bar"), []);
+  t.deepEqual(codes("foo bar"), ["implicit-operator"]);
+  t.deepEqual(codes("foo AND bar OR baz"), ["mixed-and-or"]);
 });
 
-test("toTsquery emits a single-field match", (t) => {
-  const result = toTsquery('"health care" AND policy');
+test("getStats reports features", (t) => {
+  const stats = getStats('"a b"~2 AND NOT c* AND d~1 AND e NEAR/3 f');
+  t.true(stats?.hasPhrase);
+  t.true(stats?.hasNegation);
+  t.true(stats?.hasWildcard);
+  t.true(stats?.hasFuzzy);
+  t.true(stats?.hasProximity);
+  t.is(stats?.termCount, 5);
+});
+
+test("toTinql emits explicit parentheses and AND NOT", (t) => {
+  const result = toTinql('"health care" AND policy NOT (medicare OR medicaid)');
   t.true(result.ok);
-  t.deepEqual(JSON.parse(result.expression ?? ""), {
-    type: "match",
-    field: "content_exact",
-    tsquery: "'health care' & 'policy'",
-  });
+  t.is(
+    result.tinql,
+    '("health care" AND policy) AND NOT (medicare OR medicaid)',
+  );
 });
 
-test("toTsquery splits fields into an expression tree", (t) => {
-  const result = toTsquery("content:apple AND banana", {
-    allowedFields: ["content", "content_exact"],
-  });
-  t.true(result.ok);
-  const expr = JSON.parse(result.expression ?? "");
-  t.is(expr.type, "and");
-  t.deepEqual(expr.children[0], {
-    type: "match",
-    field: "content",
-    tsquery: "'apple'",
-  });
+test("toTinql rewrites negation-only queries with match-all", (t) => {
+  t.is(toTinql("NOT spam").tinql, "* AND NOT spam");
+  t.is(toTinql("apple OR NOT spam").tinql, "apple OR (* AND NOT spam)");
 });
 
-test("toTsquery rejects wildcard queries", (t) => {
-  const result = toTsquery("appl*");
+test("toTinql supports wildcards, fuzzy and proximity", (t) => {
+  t.is(toTinql("appl* AND p?ach").tinql, "appl* AND p?ach");
+  t.is(toTinql("apple~1").tinql, "apple~1");
+  t.is(
+    toTinql('(apple OR pear) NEAR/5 "hot pie"').tinql,
+    '(apple OR pear) NEAR/5 "hot pie"',
+  );
+  t.is(toTinql('"one two three"~7').tinql, '"one two three"~7');
+});
+
+test("toTinql quotes reserved words and syntax characters", (t) => {
+  t.is(toTinql("TO AND WITHIN").tinql, '"TO" AND "WITHIN"');
+  t.is(toTinql("foo\\(bar\\)").tinql, '"foo(bar)"');
+  t.is(toTinql('"snake_case"').tinql, '"snake\\_case"');
+});
+
+test("toTinql fails with diagnostics", (t) => {
+  const result = toTinql("appl* AND *");
   t.false(result.ok);
-  t.is(result.expression, undefined);
+  t.is(result.tinql, undefined);
+  t.deepEqual(
+    result.diagnostics.items.map((d: { code?: string }) => d.code),
+    ["match-all"],
+  );
 });
 
-test("toTsquery treats AND/OR followed by a newline, CRLF, or tab as operators", (t) => {
-  for (const sep of ["\n", "\r\n", "\t"]) {
-    const and = toTsquery(`(test OR test)${sep}AND${sep}(testing OR testing)`);
-    t.true(and.ok, JSON.stringify(sep));
-    t.is(and.diagnostics.items.length, 0, JSON.stringify(sep));
-    t.is(
-      JSON.parse(and.expression ?? "").tsquery,
-      "('test' | 'test') & ('testing' | 'testing')",
-      JSON.stringify(sep),
-    );
+test("options: disjunction mode and limits", (t) => {
+  t.is(
+    toTinql("apple banana", { conjunctionMode: false }).tinql,
+    "apple OR banana",
+  );
+  t.false(toTinql('"a b"~30').ok);
+  t.true(toTinql('"a b"~30', { maxSlop: 50 }).ok);
+  t.false(toTinql("apple~3").ok);
+  t.true(toTinql("apple~3", { maxFuzzyDistance: 3 }).ok);
+});
 
-    const or = toTsquery(`apple OR${sep}banana`);
-    t.true(or.ok, JSON.stringify(sep));
+test("operators followed by a newline, CRLF, or tab still bind", (t) => {
+  for (const sep of ["\n", "\r\n", "\t"]) {
+    const and = toTinql(`(test OR test)${sep}AND${sep}(testing OR testing)`);
+    t.true(and.ok, JSON.stringify(sep));
     t.is(
-      JSON.parse(or.expression ?? "").tsquery,
-      "'apple' | 'banana'",
+      and.tinql,
+      "(test OR test) AND (testing OR testing)",
       JSON.stringify(sep),
     );
+    t.is(and.diagnostics.items.length, 0, JSON.stringify(sep));
   }
 });
 
-test("bare AND/OR is reported as an error at the operator", (t) => {
-  const result = toTsquery("apple AND");
-  t.false(result.ok);
-  const [error] = result.diagnostics.items;
-  t.is(error?.code, "bare-operator");
-  t.is(error?.range.start.offset, 6);
-  t.is(error?.range.end.offset, 9);
-  t.false(isValid("OR banana"));
+test("diagnostics carry editor positions", (t) => {
+  const result = validate("apple AND\nbanana cherry");
+  const [warning] = result.items;
+  t.is(warning?.code, "implicit-operator");
+  t.is(warning?.range.start.line, 1);
+  t.is(warning?.range.start.column, 0);
+  t.is(warning?.range.end.column, 13);
+
+  const error = validate("日本 AND 😀x *").items.find(
+    (d: { code?: string }) => d.code === "match-all",
+  );
+  t.truthy(error);
+  t.is(error?.range.start.column, 11);
 });

@@ -1,244 +1,125 @@
 use napi_derive::napi;
 use serde::{Deserialize, Serialize};
-use tantivy_query_grammar::{
-    Occur as TantivyOccur, UserInputAst, UserInputBound as TantivyBound, UserInputLeaf,
-    UserInputLiteral,
-};
 
-/// Occurrence modifier for a clause term
+/// Byte range in the source query (start inclusive, end exclusive).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Span {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl Span {
+    pub fn new(start: usize, end: usize) -> Self {
+        Span { start, end }
+    }
+
+    pub fn to(self, other: Span) -> Span {
+        Span {
+            start: self.start.min(other.start),
+            end: self.end.max(other.end),
+        }
+    }
+}
+
+/// Fuzzy modifier on a term: `term~N` or `term~P:N`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum Occur {
-    /// Term must appear (AND, +)
-    Must,
-    /// Term must not appear (NOT, -)
-    MustNot,
-    /// Term should appear (explicit OR)
-    Should,
-    /// No explicit occur (bare term) — resolved by conjunction mode at build time
-    Default,
+pub struct Fuzzy {
+    pub distance: u32,
+    pub prefix: Option<u32>,
 }
 
-impl From<Option<TantivyOccur>> for Occur {
-    fn from(occur: Option<TantivyOccur>) -> Self {
-        match occur {
-            Some(TantivyOccur::Must) => Occur::Must,
-            Some(TantivyOccur::MustNot) => Occur::MustNot,
-            Some(TantivyOccur::Should) => Occur::Should,
-            None => Occur::Default,
-        }
-    }
-}
-
-/// Bound type for range queries
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum BoundType {
-    /// Inclusive bound [value
-    Inclusive,
-    /// Exclusive bound {value
-    Exclusive,
-    /// Unbounded (*)
-    Unbounded,
-}
-
-/// A bound value for range queries
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Bound {
-    /// The type of bound
-    pub bound_type: BoundType,
-    /// The bound value (None if unbounded)
-    pub value: Option<String>,
-}
-
-impl From<&TantivyBound> for Bound {
-    fn from(bound: &TantivyBound) -> Self {
-        match bound {
-            TantivyBound::Inclusive(v) => Bound {
-                bound_type: BoundType::Inclusive,
-                value: Some(v.clone()),
-            },
-            TantivyBound::Exclusive(v) => Bound {
-                bound_type: BoundType::Exclusive,
-                value: Some(v.clone()),
-            },
-            TantivyBound::Unbounded => Bound {
-                bound_type: BoundType::Unbounded,
-                value: None,
-            },
-        }
-    }
-}
-
-/// Delimiter type for literals
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Delimiter {
-    /// No delimiter (bare word)
-    None,
-    /// Double quotes
-    DoubleQuotes,
-    /// Single quotes
-    SingleQuotes,
-}
-
-impl From<tantivy_query_grammar::Delimiter> for Delimiter {
-    fn from(d: tantivy_query_grammar::Delimiter) -> Self {
-        match d {
-            tantivy_query_grammar::Delimiter::None => Delimiter::None,
-            tantivy_query_grammar::Delimiter::DoubleQuotes => Delimiter::DoubleQuotes,
-            tantivy_query_grammar::Delimiter::SingleQuotes => Delimiter::SingleQuotes,
-        }
-    }
-}
-
-/// A literal term in the query
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Literal {
-    /// Optional field name
-    pub field: Option<String>,
-    /// The phrase/term value
-    pub phrase: String,
-    /// Delimiter used
-    pub delimiter: Delimiter,
-    /// Slop for phrase queries (distance between terms)
-    pub slop: u32,
-    /// Whether this is a prefix query
-    pub prefix: bool,
-}
-
-impl From<&UserInputLiteral> for Literal {
-    fn from(lit: &UserInputLiteral) -> Self {
-        Literal {
-            field: lit.field_name.clone(),
-            phrase: lit.phrase.clone(),
-            delimiter: lit.delimiter.into(),
-            slop: lit.slop,
-            prefix: lit.prefix,
-        }
-    }
-}
-
-/// A range query
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RangeQuery {
-    /// Optional field name
-    pub field: Option<String>,
-    /// Lower bound
-    pub lower: Bound,
-    /// Upper bound
-    pub upper: Bound,
-}
-
-/// A set/IN query
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SetQuery {
-    /// Optional field name
-    pub field: Option<String>,
-    /// Set elements
-    pub elements: Vec<String>,
-}
-
-/// An exists query (field:*)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExistsQuery {
-    /// Field name
-    pub field: String,
-}
-
-/// Types of leaf nodes in the AST
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Query syntax tree. Every node carries the byte span it was parsed from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
-pub enum LeafNode {
-    /// A literal term or phrase
-    Literal(Literal),
-    /// Match all documents (*)
-    All,
-    /// A range query
-    Range(RangeQuery),
-    /// A set/IN query
-    Set(SetQuery),
-    /// An exists query
-    Exists(ExistsQuery),
+pub enum Node {
+    /// Bare word. `wildcard` is set when the value holds an unescaped `*`/`?`;
+    /// escaped ones stay as `\*` / `\?` in `value`.
+    Term {
+        value: String,
+        wildcard: bool,
+        fuzzy: Option<Fuzzy>,
+        span: Span,
+    },
+    /// Quoted phrase with its raw inner text and optional `~N` slop.
+    Phrase {
+        text: String,
+        slop: u32,
+        span: Span,
+    },
+    /// Standalone `*`.
+    All {
+        span: Span,
+    },
+    /// Parenthesised sub-expression.
+    Group {
+        child: Box<Node>,
+        span: Span,
+    },
+    /// `NOT x` / `-x`.
+    Not {
+        child: Box<Node>,
+        span: Span,
+    },
+    /// `a NEAR/N b` (unordered) or `a THEN/N b` (ordered).
+    Proximity {
+        left: Box<Node>,
+        right: Box<Node>,
+        gap: u32,
+        ordered: bool,
+        span: Span,
+    },
+    And {
+        children: Vec<Node>,
+        span: Span,
+    },
+    Or {
+        children: Vec<Node>,
+        span: Span,
+    },
+    /// `x^N`; parsed for compatibility, ignored by the emitter.
+    Boost {
+        factor: f64,
+        child: Box<Node>,
+        span: Span,
+    },
 }
 
-impl From<&UserInputLeaf> for LeafNode {
-    fn from(leaf: &UserInputLeaf) -> Self {
-        match leaf {
-            UserInputLeaf::Literal(lit) => LeafNode::Literal(lit.into()),
-            UserInputLeaf::All => LeafNode::All,
-            UserInputLeaf::Range {
-                field,
-                lower,
-                upper,
-            } => LeafNode::Range(RangeQuery {
-                field: field.clone(),
-                lower: lower.into(),
-                upper: upper.into(),
-            }),
-            UserInputLeaf::Set { field, elements } => LeafNode::Set(SetQuery {
-                field: field.clone(),
-                elements: elements.clone(),
-            }),
-            UserInputLeaf::Exists { field } => LeafNode::Exists(ExistsQuery {
-                field: field.clone(),
-            }),
+impl Node {
+    pub fn span(&self) -> Span {
+        match self {
+            Node::Term { span, .. }
+            | Node::Phrase { span, .. }
+            | Node::All { span }
+            | Node::Group { span, .. }
+            | Node::Not { span, .. }
+            | Node::Proximity { span, .. }
+            | Node::And { span, .. }
+            | Node::Or { span, .. }
+            | Node::Boost { span, .. } => *span,
         }
     }
-}
 
-/// A clause member (occur + node)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ClauseMember {
-    /// Occurrence modifier
-    pub occur: Occur,
-    /// The AST node
-    pub node: QueryNode,
-}
+    /// The node with any wrapping groups and boosts peeled off.
+    pub fn unwrapped(&self) -> &Node {
+        match self {
+            Node::Group { child, .. } | Node::Boost { child, .. } => child.unwrapped(),
+            other => other,
+        }
+    }
 
-/// Boolean clause containing multiple members
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Clause {
-    pub members: Vec<ClauseMember>,
-}
+    pub fn is_negation(&self) -> bool {
+        matches!(self.unwrapped(), Node::Not { .. })
+    }
 
-/// Main AST node type - can be a leaf, clause, or boost
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "nodeType", rename_all = "camelCase")]
-pub enum QueryNode {
-    /// Leaf node (literal, range, set, etc.)
-    Leaf(LeafNode),
-    /// Boolean clause
-    Clause(Clause),
-    /// Boosted node
-    Boost { factor: f64, node: Box<QueryNode> },
-}
-
-impl From<&UserInputAst> for QueryNode {
-    fn from(ast: &UserInputAst) -> Self {
-        match ast {
-            UserInputAst::Clause(members) => {
-                let members = members
-                    .iter()
-                    .map(|(occur, node)| ClauseMember {
-                        occur: (*occur).into(),
-                        node: QueryNode::from(node),
-                    })
-                    .collect();
-                QueryNode::Clause(Clause { members })
+    pub fn children(&self) -> Vec<&Node> {
+        match self {
+            Node::Term { .. } | Node::Phrase { .. } | Node::All { .. } => Vec::new(),
+            Node::Group { child, .. } | Node::Not { child, .. } | Node::Boost { child, .. } => {
+                vec![child]
             }
-            UserInputAst::Leaf(leaf) => QueryNode::Leaf(LeafNode::from(leaf.as_ref())),
-            UserInputAst::Boost(inner, factor) => QueryNode::Boost {
-                factor: *factor,
-                node: Box::new(QueryNode::from(inner.as_ref())),
-            },
+            Node::Proximity { left, right, .. } => vec![left, right],
+            Node::And { children, .. } | Node::Or { children, .. } => children.iter().collect(),
         }
     }
 }
@@ -247,12 +128,10 @@ impl From<&UserInputAst> for QueryNode {
 #[napi(object)]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct QueryStats {
-    /// Total number of terms
+    /// Number of terms and phrases
     pub term_count: u32,
     /// Maximum nesting depth
     pub max_depth: u32,
-    /// Fields referenced in the query
-    pub fields: Vec<String>,
     /// Whether the query contains a match-all (*)
     pub has_match_all: bool,
     /// Whether the query contains any boosted terms
@@ -261,65 +140,43 @@ pub struct QueryStats {
     pub has_negation: bool,
     /// Whether the query contains any phrase queries
     pub has_phrase: bool,
-    /// Whether the query contains any range queries
-    pub has_range: bool,
+    /// Whether the query contains any wildcard terms
+    pub has_wildcard: bool,
+    /// Whether the query contains any fuzzy terms
+    pub has_fuzzy: bool,
+    /// Whether the query contains any NEAR/THEN proximity operators
+    pub has_proximity: bool,
 }
 
 impl QueryStats {
-    pub fn from_node(node: &QueryNode) -> Self {
+    pub fn from_node(node: &Node) -> Self {
         let mut stats = QueryStats::default();
-        Self::collect_stats(node, &mut stats, 1);
-        stats.fields.sort();
-        stats.fields.dedup();
+        Self::collect(node, &mut stats, 1);
         stats
     }
 
-    fn collect_stats(node: &QueryNode, stats: &mut QueryStats, depth: u32) {
+    fn collect(node: &Node, stats: &mut QueryStats, depth: u32) {
         stats.max_depth = stats.max_depth.max(depth);
-
         match node {
-            QueryNode::Leaf(leaf) => {
+            Node::Term {
+                wildcard, fuzzy, ..
+            } => {
                 stats.term_count += 1;
-                match leaf {
-                    LeafNode::Literal(lit) => {
-                        if let Some(field) = &lit.field {
-                            stats.fields.push(field.clone());
-                        }
-                        if lit.phrase.contains(' ') || lit.slop > 0 {
-                            stats.has_phrase = true;
-                        }
-                    }
-                    LeafNode::All => {
-                        stats.has_match_all = true;
-                    }
-                    LeafNode::Range(r) => {
-                        stats.has_range = true;
-                        if let Some(field) = &r.field {
-                            stats.fields.push(field.clone());
-                        }
-                    }
-                    LeafNode::Set(s) => {
-                        if let Some(field) = &s.field {
-                            stats.fields.push(field.clone());
-                        }
-                    }
-                    LeafNode::Exists(e) => {
-                        stats.fields.push(e.field.clone());
-                    }
-                }
+                stats.has_wildcard |= *wildcard;
+                stats.has_fuzzy |= fuzzy.is_some();
             }
-            QueryNode::Clause(clause) => {
-                for member in &clause.members {
-                    if member.occur == Occur::MustNot {
-                        stats.has_negation = true;
-                    }
-                    Self::collect_stats(&member.node, stats, depth + 1);
-                }
+            Node::Phrase { .. } => {
+                stats.term_count += 1;
+                stats.has_phrase = true;
             }
-            QueryNode::Boost { node, .. } => {
-                stats.has_boost = true;
-                Self::collect_stats(node, stats, depth + 1);
-            }
+            Node::All { .. } => stats.has_match_all = true,
+            Node::Not { .. } => stats.has_negation = true,
+            Node::Proximity { .. } => stats.has_proximity = true,
+            Node::Boost { .. } => stats.has_boost = true,
+            Node::Group { .. } | Node::And { .. } | Node::Or { .. } => {}
+        }
+        for child in node.children() {
+            Self::collect(child, stats, depth + 1);
         }
     }
 }

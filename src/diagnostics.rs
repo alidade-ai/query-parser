@@ -1,6 +1,8 @@
 use napi_derive::napi;
 use serde::{Deserialize, Serialize};
 
+use crate::ast::Span;
+
 /// Diagnostic severity levels
 #[napi]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -17,22 +19,22 @@ pub enum DiagnosticSeverity {
 pub struct Position {
     /// Line number (0-indexed)
     pub line: u32,
-    /// Column number (0-indexed)
+    /// Column within the line in UTF-16 code units (0-indexed), as editors count it
     pub column: u32,
-    /// Byte offset in the source string
+    /// Byte offset in the UTF-8 source string
     pub offset: u32,
 }
 
 impl Position {
     pub fn from_offset(source: &str, offset: usize) -> Self {
-        let offset = offset.min(source.len());
+        let mut offset = offset.min(source.len());
+        while !source.is_char_boundary(offset) {
+            offset -= 1;
+        }
         let before = &source[..offset];
-        let line = before.chars().filter(|&c| c == '\n').count() as u32;
-        let column = before
-            .rfind('\n')
-            .map(|pos| offset - pos - 1)
-            .unwrap_or(offset) as u32;
-
+        let line = before.matches('\n').count() as u32;
+        let line_start = before.rfind('\n').map(|p| p + 1).unwrap_or(0);
+        let column = before[line_start..].encode_utf16().count() as u32;
         Position {
             line,
             column,
@@ -54,20 +56,16 @@ impl Range {
     pub fn from_offsets(source: &str, start: usize, end: usize) -> Self {
         Range {
             start: Position::from_offset(source, start),
-            end: Position::from_offset(source, end),
+            end: Position::from_offset(source, end.max(start)),
         }
     }
 
-    pub fn at_offset(source: &str, offset: usize) -> Self {
-        let pos = Position::from_offset(source, offset);
-        Range {
-            start: pos,
-            end: Position {
-                line: pos.line,
-                column: pos.column + 1,
-                offset: pos.offset + 1,
-            },
-        }
+    pub fn from_span(source: &str, span: Span) -> Self {
+        Self::from_offsets(source, span.start, span.end)
+    }
+
+    pub fn whole(source: &str) -> Self {
+        Self::from_offsets(source, 0, source.len())
     }
 }
 
@@ -78,54 +76,41 @@ pub struct Diagnostic {
     pub message: String,
     pub severity: DiagnosticSeverity,
     pub range: Range,
+    /// Stable machine-readable rule id (e.g. `mixed-and-or`)
     pub code: Option<String>,
     pub source: Option<String>,
+    /// Longer explanation or a suggested fix
     pub related_info: Option<String>,
 }
 
+const SOURCE: &str = "alidade-query-parser";
+
 impl Diagnostic {
-    pub fn error(message: impl Into<String>, range: Range) -> Self {
+    fn new(severity: DiagnosticSeverity, message: impl Into<String>, range: Range) -> Self {
         Self {
             message: message.into(),
-            severity: DiagnosticSeverity::Error,
+            severity,
             range,
             code: None,
-            source: Some("alidade-query-parser".to_string()),
+            source: Some(SOURCE.to_string()),
             related_info: None,
         }
+    }
+
+    pub fn error(message: impl Into<String>, range: Range) -> Self {
+        Self::new(DiagnosticSeverity::Error, message, range)
     }
 
     pub fn warning(message: impl Into<String>, range: Range) -> Self {
-        Self {
-            message: message.into(),
-            severity: DiagnosticSeverity::Warning,
-            range,
-            code: None,
-            source: Some("alidade-query-parser".to_string()),
-            related_info: None,
-        }
+        Self::new(DiagnosticSeverity::Warning, message, range)
     }
 
     pub fn info(message: impl Into<String>, range: Range) -> Self {
-        Self {
-            message: message.into(),
-            severity: DiagnosticSeverity::Info,
-            range,
-            code: None,
-            source: Some("alidade-query-parser".to_string()),
-            related_info: None,
-        }
+        Self::new(DiagnosticSeverity::Info, message, range)
     }
 
     pub fn hint(message: impl Into<String>, range: Range) -> Self {
-        Self {
-            message: message.into(),
-            severity: DiagnosticSeverity::Hint,
-            range,
-            code: None,
-            source: Some("alidade-query-parser".to_string()),
-            related_info: None,
-        }
+        Self::new(DiagnosticSeverity::Hint, message, range)
     }
 
     pub fn with_code(mut self, code: impl Into<String>) -> Self {
@@ -178,5 +163,23 @@ impl DiagnosticList {
         self.items
             .iter()
             .filter(|d| d.severity == DiagnosticSeverity::Warning)
+    }
+
+    pub fn codes(&self) -> Vec<&str> {
+        self.items
+            .iter()
+            .filter_map(|d| d.code.as_deref())
+            .collect()
+    }
+
+    /// Order by position so editors and tests see a stable list.
+    pub fn sort(&mut self) {
+        self.items.sort_by_key(|d| {
+            (
+                d.range.start.offset,
+                d.range.end.offset,
+                std::cmp::Reverse(d.severity as u8),
+            )
+        });
     }
 }

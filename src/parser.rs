@@ -1,256 +1,604 @@
-use std::borrow::Cow;
-
-use crate::ast::{QueryNode, QueryStats};
+use crate::ast::{Node, Span};
 use crate::diagnostics::{Diagnostic, DiagnosticList, Range};
+use crate::lexer::{Lexed, Token, TokenKind, lex};
 
-/// Result of parsing a query
-pub struct ParseResult {
-    /// The parsed AST (if parsing succeeded enough to produce one)
-    pub ast: Option<QueryNode>,
-    /// Diagnostics collected during parsing
+pub struct Parsed {
+    pub ast: Option<Node>,
     pub diagnostics: DiagnosticList,
-    /// Query statistics
-    pub stats: Option<QueryStats>,
 }
 
-impl ParseResult {
-    /// Returns true if parsing was successful (no errors)
-    pub fn is_ok(&self) -> bool {
-        !self.diagnostics.has_errors()
-    }
+/// Operator inserted between adjacent operands with no explicit keyword.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImplicitOp {
+    And,
+    Or,
 }
 
-/// Parse a query string and return the result with diagnostics.
-/// Uses lenient parsing to provide as much information as possible
-/// even when the query has errors.
-pub fn parse_query(source: &str) -> ParseResult {
-    let (ast, errors) = tantivy_query_grammar::parse_query_lenient(&normalize_whitespace(source));
+struct Parser<'a> {
+    source: &'a str,
+    tokens: Vec<Token>,
+    pos: usize,
+    implicit: ImplicitOp,
+    diagnostics: DiagnosticList,
+}
 
-    let mut diagnostics = DiagnosticList::new();
+/// An operand plus whether it carried its own `+`/`-`/`NOT` marker, which
+/// decides whether adjacency to it deserves an implicit-operator warning.
+struct Operand {
+    node: Node,
+    marked: bool,
+}
 
-    // Convert tantivy errors to our diagnostic format
-    for error in errors {
-        let range = Range::at_offset(source, error.pos);
-        let diagnostic = Diagnostic::error(&error.message, range)
-            .with_code("parse-error")
-            .with_related_info(get_syntax_help(&error.message));
-        diagnostics.push(diagnostic);
-    }
-
-    let query_node = QueryNode::from(&ast);
-    let stats = QueryStats::from_node(&query_node);
-
-    ParseResult {
-        ast: Some(query_node),
+pub fn parse(source: &str, implicit: ImplicitOp) -> Parsed {
+    let Lexed {
+        tokens,
         diagnostics,
-        stats: Some(stats),
+    } = lex(source);
+    let mut parser = Parser {
+        source,
+        tokens,
+        pos: 0,
+        implicit,
+        diagnostics,
+    };
+    let ast = parser.parse_query();
+    parser.diagnostics.sort();
+    Parsed {
+        ast,
+        diagnostics: parser.diagnostics,
     }
 }
 
-/// The grammar only recognises operators as `AND ` / `OR ` (a literal space),
-/// so a newline or tab after one silently turns it into a search term. Map
-/// every ASCII whitespace byte to a space before parsing. The mapping is
-/// byte-for-byte, so grammar error offsets stay valid against the original
-/// source; positions are always computed from the original so line/column
-/// survive for multi-line editors.
-pub(crate) fn normalize_whitespace(source: &str) -> Cow<'_, str> {
-    if source.bytes().any(|b| b != b' ' && b.is_ascii_whitespace()) {
-        Cow::Owned(
-            source
-                .chars()
-                .map(|c| if c.is_ascii_whitespace() { ' ' } else { c })
-                .collect(),
+impl<'a> Parser<'a> {
+    fn peek(&self) -> Option<&TokenKind> {
+        self.tokens.get(self.pos).map(|t| &t.kind)
+    }
+
+    fn bump(&mut self) -> Token {
+        let token = self.tokens[self.pos].clone();
+        self.pos += 1;
+        token
+    }
+
+    fn error(&mut self, code: &str, message: impl Into<String>, span: Span) {
+        self.diagnostics
+            .push(Diagnostic::error(message, Range::from_span(self.source, span)).with_code(code));
+    }
+
+    fn warning(&mut self, code: &str, message: impl Into<String>, span: Span) {
+        self.diagnostics.push(
+            Diagnostic::warning(message, Range::from_span(self.source, span)).with_code(code),
+        );
+    }
+
+    fn starts_operand(kind: &TokenKind) -> bool {
+        matches!(
+            kind,
+            TokenKind::Word { .. }
+                | TokenKind::Phrase { .. }
+                | TokenKind::All
+                | TokenKind::LParen
+                | TokenKind::LBracket
+                | TokenKind::Plus
+                | TokenKind::Minus
+                | TokenKind::Not
         )
-    } else {
-        Cow::Borrowed(source)
-    }
-}
-
-/// Validate a query string and return only diagnostics (no AST).
-/// More efficient when you only need to check validity.
-pub fn validate_query(source: &str) -> DiagnosticList {
-    parse_query(source).diagnostics
-}
-
-/// Get contextual help for an error message
-fn get_syntax_help(error_msg: &str) -> String {
-    let msg = error_msg.to_lowercase();
-
-    if msg.contains("expected word") || msg.contains("expected term") {
-        return "A search term was expected. Examples: apple, title:hello, \"phrase query\"".into();
     }
 
-    if msg.contains("range") {
-        return "Range syntax: field:[start TO end] or field:{start TO end}".into();
+    fn parse_query(&mut self) -> Option<Node> {
+        let mut parts: Vec<Node> = Vec::new();
+        while self.pos < self.tokens.len() {
+            let before = self.pos;
+            if let Some(node) = self.parse_or() {
+                parts.push(node);
+            }
+            match self.peek() {
+                None => break,
+                Some(TokenKind::RParen) => {
+                    let span = self.bump().span;
+                    self.error("unbalanced-paren", "Unmatched closing parenthesis", span);
+                }
+                Some(TokenKind::RBracket) => {
+                    let span = self.bump().span;
+                    self.error("unsupported-syntax", "Unmatched closing bracket", span);
+                }
+                Some(_) if self.pos == before => {
+                    let token = self.bump();
+                    self.error(
+                        "unexpected-token",
+                        format!("Unexpected {}", token.kind.describe()),
+                        token.span,
+                    );
+                }
+                Some(_) => {}
+            }
+        }
+        combine(parts, self.implicit)
     }
 
-    if msg.contains("quote") || msg.contains("unterminated") {
-        return "Phrases must be enclosed in matching quotes: \"like this\" or 'like this'".into();
+    fn parse_or(&mut self) -> Option<Node> {
+        let mut children: Vec<Node> = Vec::new();
+        if let Some(first) = self.parse_and() {
+            children.push(first.node);
+        }
+        loop {
+            match self.peek() {
+                Some(TokenKind::Or) => {
+                    let span = self.bump().span;
+                    let before = self.diagnostics.items.len();
+                    match self.parse_and() {
+                        Some(operand) => children.push(operand.node),
+                        None if self.diagnostics.items.len() == before => {
+                            self.error("bare-operator", "OR has no search term after it", span)
+                        }
+                        None => {}
+                    }
+                }
+                Some(kind) if self.implicit == ImplicitOp::Or && Self::starts_operand(kind) => {
+                    let Some(operand) = self.parse_and() else {
+                        break;
+                    };
+                    self.warn_implicit(children.last(), &operand);
+                    children.push(operand.node);
+                }
+                _ => break,
+            }
+        }
+        combine(children, ImplicitOp::Or)
     }
 
-    "Check your query syntax. Common patterns:\n\
-     - term AND term\n\
-     - term OR term\n\
-     - +required -excluded\n\
-     - field:value\n\
-     - \"exact phrase\"\n\
-     - field:[a TO z]"
-        .into()
-}
-
-/// Linter trait for custom validation rules.
-pub trait Linter {
-    /// Lint a parsed query and return additional diagnostics
-    fn lint(&self, source: &str, ast: &QueryNode) -> DiagnosticList;
-}
-
-/// A collection of linters that can be applied to queries
-pub struct LinterPipeline {
-    linters: Vec<Box<dyn Linter + Send + Sync>>,
-}
-
-impl Default for LinterPipeline {
-    fn default() -> Self {
-        Self::new()
+    fn parse_and(&mut self) -> Option<Operand> {
+        let first = self.parse_not()?;
+        let mut marked = first.marked;
+        let mut children = vec![first.node];
+        loop {
+            match self.peek() {
+                Some(TokenKind::And) => {
+                    let span = self.bump().span;
+                    let before = self.diagnostics.items.len();
+                    match self.parse_not() {
+                        Some(operand) => children.push(operand.node),
+                        None if self.diagnostics.items.len() == before => {
+                            self.error("bare-operator", "AND has no search term after it", span)
+                        }
+                        None => {}
+                    }
+                }
+                Some(kind) if self.implicit == ImplicitOp::And && Self::starts_operand(kind) => {
+                    let Some(operand) = self.parse_not() else {
+                        break;
+                    };
+                    self.warn_implicit(children.last(), &operand);
+                    children.push(operand.node);
+                }
+                _ => break,
+            }
+        }
+        if children.len() > 1 {
+            marked = false;
+        }
+        combine(children, ImplicitOp::And).map(|node| Operand { node, marked })
     }
-}
 
-impl LinterPipeline {
-    pub fn new() -> Self {
-        Self {
-            linters: Vec::new(),
+    /// `apple banana` warns; `apple NOT banana`, `apple -banana` and
+    /// `+apple +banana` carry explicit markers and do not.
+    fn warn_implicit(&mut self, previous: Option<&Node>, next: &Operand) {
+        let Some(previous) = previous else { return };
+        if next.node.is_negation() || next.marked {
+            return;
+        }
+        let span = previous.span().to(next.node.span());
+        let message = match self.implicit {
+            ImplicitOp::And => {
+                "Space-separated terms are combined with AND; use an explicit AND to make this clear"
+            }
+            ImplicitOp::Or => {
+                "Space-separated terms are combined with OR; use an explicit OR to make this clear"
+            }
+        };
+        self.warning("implicit-operator", message, span);
+    }
+
+    fn parse_not(&mut self) -> Option<Operand> {
+        match self.peek() {
+            Some(TokenKind::Not | TokenKind::Minus) => {
+                let token = self.bump();
+                let before = self.diagnostics.items.len();
+                match self.parse_not() {
+                    Some(operand) => {
+                        let span = token.span.to(operand.node.span());
+                        Some(Operand {
+                            node: Node::Not {
+                                child: Box::new(operand.node),
+                                span,
+                            },
+                            marked: true,
+                        })
+                    }
+                    None => {
+                        if self.diagnostics.items.len() == before {
+                            self.error(
+                                "bare-operator",
+                                format!("{} has no search term after it", token.kind.describe()),
+                                token.span,
+                            );
+                        }
+                        None
+                    }
+                }
+            }
+            Some(TokenKind::Plus) => {
+                let token = self.bump();
+                let before = self.diagnostics.items.len();
+                match self.parse_not() {
+                    Some(operand) => Some(Operand {
+                        node: operand.node,
+                        marked: true,
+                    }),
+                    None => {
+                        if self.diagnostics.items.len() == before {
+                            self.error(
+                                "bare-operator",
+                                "+ has no search term after it",
+                                token.span,
+                            );
+                        }
+                        None
+                    }
+                }
+            }
+            _ => self.parse_proximity().map(|node| Operand {
+                node,
+                marked: false,
+            }),
         }
     }
 
-    /// Add a linter to the pipeline
-    pub fn add<L: Linter + Send + Sync + 'static>(&mut self, linter: L) {
-        self.linters.push(Box::new(linter));
+    fn parse_proximity(&mut self) -> Option<Node> {
+        let mut left = self.parse_postfix()?;
+        loop {
+            let (gap, ordered) = match self.peek() {
+                Some(TokenKind::Near(gap)) => (gap.unwrap_or(0), false),
+                Some(TokenKind::Then(gap)) => (gap.unwrap_or(0), true),
+                _ => break,
+            };
+            let token = self.bump();
+            let before = self.diagnostics.items.len();
+            match self.parse_postfix() {
+                Some(right) => {
+                    let span = left.span().to(right.span());
+                    left = Node::Proximity {
+                        left: Box::new(left),
+                        right: Box::new(right),
+                        gap,
+                        ordered,
+                        span,
+                    };
+                }
+                None if self.diagnostics.items.len() == before => self.error(
+                    "bare-operator",
+                    format!("{} has no search term after it", token.kind.describe()),
+                    token.span,
+                ),
+                None => {}
+            }
+        }
+        Some(left)
     }
 
-    /// Run all linters and collect diagnostics
-    pub fn lint(&self, source: &str, ast: &QueryNode) -> DiagnosticList {
-        let mut diagnostics = DiagnosticList::new();
-        for linter in &self.linters {
-            diagnostics.extend(linter.lint(source, ast).items);
+    fn parse_postfix(&mut self) -> Option<Node> {
+        let mut node = self.parse_primary()?;
+        while let Some(TokenKind::Boost(factor)) = self.peek() {
+            let factor = *factor;
+            let token = self.bump();
+            self.warning(
+                "boost-ignored",
+                "Boost (^) has no effect on matching and is ignored",
+                token.span,
+            );
+            let span = node.span().to(token.span);
+            node = Node::Boost {
+                factor,
+                child: Box::new(node),
+                span,
+            };
         }
-        diagnostics
+        Some(node)
+    }
+
+    fn parse_primary(&mut self) -> Option<Node> {
+        let kind = self.peek()?.clone();
+        match kind {
+            TokenKind::Word {
+                text,
+                wildcard,
+                fuzzy,
+            } => {
+                let span = self.bump().span;
+                Some(Node::Term {
+                    value: text,
+                    wildcard,
+                    fuzzy,
+                    span,
+                })
+            }
+            TokenKind::Phrase { text, slop } => {
+                let span = self.bump().span;
+                Some(Node::Phrase {
+                    text,
+                    slop: slop.unwrap_or(0),
+                    span,
+                })
+            }
+            TokenKind::All => {
+                let span = self.bump().span;
+                Some(Node::All { span })
+            }
+            TokenKind::LParen => {
+                let open = self.bump().span;
+                let inner = self.parse_or();
+                let close = match self.peek() {
+                    Some(TokenKind::RParen) => Some(self.bump().span),
+                    _ => {
+                        self.error("unbalanced-paren", "Missing closing parenthesis", open);
+                        None
+                    }
+                };
+                let end = close.unwrap_or_else(|| inner.as_ref().map_or(open, |n| n.span()));
+                let span = open.to(end);
+                match inner {
+                    Some(child) => Some(Node::Group {
+                        child: Box::new(child),
+                        span,
+                    }),
+                    None => {
+                        self.error("empty-group", "Empty parentheses", span);
+                        None
+                    }
+                }
+            }
+            TokenKind::LBracket => {
+                let open = self.bump().span;
+                let mut depth = 1usize;
+                let mut end = open;
+                while let Some(kind) = self.peek() {
+                    match kind {
+                        TokenKind::LBracket => depth += 1,
+                        TokenKind::RBracket => depth -= 1,
+                        _ => {}
+                    }
+                    end = self.bump().span;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                self.error(
+                    "unsupported-syntax",
+                    "Square brackets are not supported; use parentheses with OR, for example (apple OR pear)",
+                    open.to(end),
+                );
+                self.parse_primary()
+            }
+            TokenKind::And | TokenKind::Or | TokenKind::Near(_) | TokenKind::Then(_) => {
+                let token = self.bump();
+                self.error(
+                    "bare-operator",
+                    format!("{} has no search term before it", token.kind.describe()),
+                    token.span,
+                );
+                self.parse_primary()
+            }
+            TokenKind::Not | TokenKind::Plus | TokenKind::Minus => {
+                self.parse_not().map(|operand| operand.node)
+            }
+            TokenKind::Boost(_) => {
+                let token = self.bump();
+                self.error(
+                    "dangling-modifier",
+                    "^ must directly follow a term, phrase or closing parenthesis",
+                    token.span,
+                );
+                self.parse_primary()
+            }
+            TokenKind::RParen | TokenKind::RBracket => None,
+        }
     }
 }
 
-/// Parse and lint a query with a custom linter pipeline
-pub fn parse_and_lint(source: &str, linters: &LinterPipeline) -> ParseResult {
-    let mut result = parse_query(source);
-
-    // Only run linters if we have an AST
-    if let Some(ast) = &result.ast {
-        let lint_diagnostics = linters.lint(source, ast);
-        result.diagnostics.extend(lint_diagnostics.items);
+fn combine(mut children: Vec<Node>, op: ImplicitOp) -> Option<Node> {
+    match children.len() {
+        0 => None,
+        1 => children.pop(),
+        _ => {
+            let span = children[0].span().to(children[children.len() - 1].span());
+            Some(match op {
+                ImplicitOp::And => Node::And { children, span },
+                ImplicitOp::Or => Node::Or { children, span },
+            })
+        }
     }
-
-    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::linters::default_pipeline;
+    use crate::format::format_node;
 
-    #[test]
-    fn test_parse_simple_query() {
-        let result = parse_query("apple OR orange");
-        assert!(result.is_ok());
-        assert!(result.ast.is_some());
+    fn p(source: &str) -> Parsed {
+        parse(source, ImplicitOp::And)
+    }
+
+    fn shape(source: &str) -> String {
+        let parsed = p(source);
+        assert!(
+            !parsed.diagnostics.has_errors(),
+            "{source:?}: {:?}",
+            parsed.diagnostics.items
+        );
+        format_node(&parsed.ast.expect("ast"))
+    }
+
+    fn codes(source: &str) -> Vec<String> {
+        p(source)
+            .diagnostics
+            .codes()
+            .into_iter()
+            .map(String::from)
+            .collect()
     }
 
     #[test]
-    fn test_parse_invalid_query() {
-        let result = parse_query("title:");
-        assert!(!result.is_ok());
-        assert!(result.diagnostics.has_errors());
+    fn precedence_and_binds_tighter_than_or() {
+        assert_eq!(shape("a AND b OR c"), "a AND b OR c");
+        let ast = p("a AND b OR c").ast.unwrap();
+        assert!(
+            matches!(ast, Node::Or { ref children, .. } if matches!(children[0], Node::And { .. }))
+        );
     }
 
     #[test]
-    fn test_parse_complex_query() {
-        let result = parse_query("(apple OR orange) AND title:fruit -rotten");
-        assert!(result.is_ok());
-        let stats = result.stats.unwrap();
-        assert!(stats.has_negation);
-        assert!(stats.fields.contains(&"title".to_string()));
+    fn same_operator_chains_flatten() {
+        let ast = p("a AND b AND c").ast.unwrap();
+        assert!(matches!(ast, Node::And { ref children, .. } if children.len() == 3));
+        let ast = p("a OR b OR c").ast.unwrap();
+        assert!(matches!(ast, Node::Or { ref children, .. } if children.len() == 3));
     }
 
     #[test]
-    fn test_lint_rejects_standalone_wildcard() {
-        let pipeline = default_pipeline();
-        let result = parse_and_lint("*", &pipeline);
-        assert!(result.diagnostics.has_errors());
-        let errors: Vec<_> = result.diagnostics.errors().collect();
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].code.as_deref(), Some("no-wildcard"));
+    fn groups_keep_parentheses() {
+        assert_eq!(shape("(a OR b) AND c"), "(a OR b) AND c");
+        assert_eq!(shape("NOT (a OR b)"), "NOT (a OR b)");
     }
 
     #[test]
-    fn test_lint_rejects_prefix_wildcard() {
-        let pipeline = default_pipeline();
-        let result = parse_and_lint("appl*", &pipeline);
-        assert!(result.diagnostics.has_errors());
-        let errors: Vec<_> = result.diagnostics.errors().collect();
-        assert_eq!(errors.len(), 1);
-        assert!(errors[0].message.contains("prefix query"));
+    fn not_forms() {
+        assert_eq!(shape("a NOT b"), "a AND NOT b");
+        assert_eq!(shape("a AND NOT b"), "a AND NOT b");
+        assert_eq!(shape("a -b"), "a AND NOT b");
+        assert_eq!(shape("+a +b"), "a AND b");
+        assert_eq!(shape("NOT a"), "NOT a");
+        assert_eq!(shape("NOT a OR b"), "NOT a OR b");
     }
 
     #[test]
-    fn test_lint_rejects_exists_wildcard() {
-        let pipeline = default_pipeline();
-        let result = parse_and_lint("title:*", &pipeline);
-        assert!(result.diagnostics.has_errors());
-        let errors: Vec<_> = result.diagnostics.errors().collect();
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].code.as_deref(), Some("no-wildcard"));
+    fn implicit_adjacency_warns_once_per_gap() {
+        let parsed = p("alpha beta gamma");
+        let warnings: Vec<_> = parsed
+            .diagnostics
+            .items
+            .iter()
+            .filter(|d| d.code.as_deref() == Some("implicit-operator"))
+            .collect();
+        assert_eq!(warnings.len(), 2);
+        assert_eq!(warnings[0].range.start.offset, 0);
+        assert_eq!(warnings[0].range.end.offset, 10);
+        assert_eq!(warnings[1].range.start.offset, 6);
+        assert_eq!(warnings[1].range.end.offset, 16);
     }
 
     #[test]
-    fn test_lint_allows_normal_query() {
-        let pipeline = default_pipeline();
-        let result = parse_and_lint("apple AND orange", &pipeline);
-        assert!(result.is_ok());
-        assert!(!result.diagnostics.has_errors());
+    fn marked_operands_do_not_warn() {
+        for query in [
+            "apple NOT banana",
+            "apple -banana",
+            "+apple +banana",
+            "apple AND banana",
+        ] {
+            assert!(codes(query).is_empty(), "{query:?}: {:?}", codes(query));
+        }
+        assert_eq!(codes("+apple banana"), vec!["implicit-operator"]);
     }
 
     #[test]
-    fn test_lint_allows_phrase_query() {
-        let pipeline = default_pipeline();
-        let result = parse_and_lint("\"climate change\" AND policy", &pipeline);
-        assert!(result.is_ok());
+    fn implicit_or_mode() {
+        let parsed = parse("apple banana", ImplicitOp::Or);
+        assert!(matches!(parsed.ast, Some(Node::Or { .. })));
+        let parsed = parse("apple banana AND cherry", ImplicitOp::Or);
+        assert_eq!(
+            format_node(&parsed.ast.unwrap()),
+            "apple OR banana AND cherry"
+        );
     }
 
     #[test]
-    fn test_operator_followed_by_newline_is_still_an_operator() {
-        for sep in ["\n", "\r\n", "\t", "\n\n"] {
-            let result = parse_query(&format!("apple AND{sep}orange"));
-            assert!(result.is_ok(), "sep {sep:?}");
-            assert_eq!(result.stats.unwrap().term_count, 2, "sep {sep:?}");
+    fn bare_operators_are_localized_errors() {
+        for (query, start, end) in [
+            ("apple AND", 6, 9),
+            ("apple AND OR banana", 10, 12),
+            ("(apple OR) AND banana", 7, 9),
+            ("OR banana", 0, 2),
+            ("apple NOT", 6, 9),
+            ("apple NEAR/2", 6, 12),
+        ] {
+            let parsed = p(query);
+            let errors: Vec<_> = parsed
+                .diagnostics
+                .items
+                .iter()
+                .filter(|d| d.code.as_deref() == Some("bare-operator"))
+                .collect();
+            assert_eq!(errors.len(), 1, "{query:?}: {:?}", parsed.diagnostics.items);
+            assert_eq!(errors[0].range.start.offset, start, "{query:?}");
+            assert_eq!(errors[0].range.end.offset, end, "{query:?}");
         }
     }
 
     #[test]
-    fn test_lint_rejects_bare_operator() {
-        let pipeline = default_pipeline();
-        let result = parse_and_lint("apple AND", &pipeline);
-        let errors: Vec<_> = result.diagnostics.errors().collect();
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].code.as_deref(), Some("bare-operator"));
-        assert_eq!(errors[0].range.start.offset, 6);
-        assert_eq!(errors[0].range.end.offset, 9);
+    fn recovery_keeps_the_rest_of_the_query() {
+        let parsed = p("apple AND OR banana");
+        assert_eq!(format_node(&parsed.ast.unwrap()), "apple AND banana");
     }
 
     #[test]
-    fn test_lint_wildcard_in_complex_query() {
-        let pipeline = default_pipeline();
-        let result = parse_and_lint("apple AND orang*", &pipeline);
-        assert!(result.diagnostics.has_errors());
-        let errors: Vec<_> = result.diagnostics.errors().collect();
-        assert_eq!(errors.len(), 1);
-        // "apple AND orang*" — the * is at byte offset 15 (0-indexed)
-        assert_eq!(errors[0].range.start.offset, 15);
+    fn unbalanced_parentheses() {
+        assert_eq!(codes("(apple OR banana"), vec!["unbalanced-paren"]);
+        assert_eq!(codes("apple OR banana)"), vec!["unbalanced-paren"]);
+        assert_eq!(codes("()"), vec!["empty-group"]);
+        let parsed = p("(apple OR banana");
+        assert_eq!(parsed.diagnostics.items[0].range.start.offset, 0);
+        assert_eq!(parsed.diagnostics.items[0].range.end.offset, 1);
+    }
+
+    #[test]
+    fn brackets_are_unsupported() {
+        assert_eq!(codes("apple AND [a b c]"), vec!["unsupported-syntax"]);
+        let parsed = p("apple AND [a b c]");
+        assert_eq!(parsed.diagnostics.items[0].range.start.offset, 10);
+        assert_eq!(parsed.diagnostics.items[0].range.end.offset, 17);
+    }
+
+    #[test]
+    fn proximity_chains_left_to_right() {
+        assert_eq!(shape("a NEAR/3 b THEN/0 c"), "(a NEAR/3 b) THEN/0 c");
+        assert_eq!(shape("a NEAR/3 b AND c"), "a NEAR/3 b AND c");
+        assert_eq!(shape("NOT a NEAR/3 b"), "NOT (a NEAR/3 b)");
+        assert_eq!(shape("(a OR b) NEAR/5 \"c d\""), "(a OR b) NEAR/5 \"c d\"");
+    }
+
+    #[test]
+    fn boost_is_parsed_and_warned() {
+        assert_eq!(codes("apple^2 AND pie"), vec!["boost-ignored"]);
+        assert_eq!(shape("apple^2 AND pie"), "apple^2 AND pie");
+    }
+
+    #[test]
+    fn empty_and_whitespace_queries_have_no_ast() {
+        assert!(p("").ast.is_none());
+        assert!(p("   \n ").ast.is_none());
+        assert!(p("").diagnostics.is_empty());
+    }
+
+    #[test]
+    fn quoted_operator_words_are_phrases() {
+        assert_eq!(
+            shape("\"AND\" OR \"apple AND banana\""),
+            "\"AND\" OR \"apple AND banana\""
+        );
+    }
+
+    #[test]
+    fn lowercase_operators_are_terms() {
+        let parsed = p("rock and roll");
+        assert_eq!(format_node(&parsed.ast.unwrap()), "rock AND and AND roll");
     }
 }
