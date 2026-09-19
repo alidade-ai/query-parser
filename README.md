@@ -71,7 +71,7 @@ letters or digits, would match nothing), `empty-wildcard`, `invalid-wildcard`,
 `invalid-proximity` (`NEAR` without `/N`), `negation-in-proximity`,
 `invalid-boost`, `dangling-modifier`, `unexpected-token`.
 
-Warnings: `implicit-operator`, `leading-wildcard`, `short-wildcard`,
+Warnings: `implicit-operator`, `leading-wildcard`, `short-wildcard` (`a*`),
 `wildcard-in-phrase`, `slop-no-effect`, `boost-ignored`, `field-ignored`.
 Info: `literal-keyword`. Hint: `lowercase-operator` (`and` where `AND` was
 probably meant).

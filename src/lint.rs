@@ -226,7 +226,6 @@ impl Linter<'_> {
         let mut literal_prefix = 0usize;
         let mut literal_total = 0usize;
         let mut seen_wildcard = false;
-        let mut first_wildcard_is_star = false;
         let mut chars = value.chars();
         while let Some(c) = chars.next() {
             match c {
@@ -237,12 +236,7 @@ impl Linter<'_> {
                         literal_prefix += 1;
                     }
                 }
-                '*' | '?' => {
-                    if !seen_wildcard {
-                        first_wildcard_is_star = c == '*';
-                    }
-                    seen_wildcard = true;
-                }
+                '*' | '?' => seen_wildcard = true,
                 _ => {
                     literal_total += 1;
                     if !seen_wildcard {
@@ -269,10 +263,10 @@ impl Linter<'_> {
                 "A leading wildcard has to scan every indexed word and can be slow",
                 node,
             );
-        } else if literal_prefix < 2 && first_wildcard_is_star {
+        } else if literal_prefix < 2 && value.ends_with('*') && literal_total == literal_prefix {
             self.warning(
                 "short-wildcard",
-                "A one-character prefix before a wildcard matches a very large number of words",
+                "A one-character prefix before * matches a very large number of words",
                 node,
             );
         }
@@ -459,6 +453,12 @@ mod rule_table {
         ),
         ("a*", Expect::Warn("short-wildcard"), "one char stem"),
         ("ab*", Expect::Clean, "two char stem"),
+        ("p*ach", Expect::Clean, "star bounded on both sides"),
+        (
+            "a?",
+            Expect::Clean,
+            "single char wildcard with short prefix",
+        ),
         ("p?ach", Expect::Clean, "single char wildcard"),
         ("foo\\(bar", Expect::Clean, "escaped paren in term"),
         (
