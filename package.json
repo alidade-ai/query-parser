@@ -1,6 +1,6 @@
 {
   "name": "@alidade/query-parser",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "Boolean search query parser, linter and TINQL emitter with editor-friendly diagnostics",
   "license": "MIT",
   "repository": {
