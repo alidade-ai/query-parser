@@ -65,12 +65,6 @@ impl<'a> Parser<'a> {
             .push(Diagnostic::error(message, Range::from_span(self.source, span)).with_code(code));
     }
 
-    fn warning(&mut self, code: &str, message: impl Into<String>, span: Span) {
-        self.diagnostics.push(
-            Diagnostic::warning(message, Range::from_span(self.source, span)).with_code(code),
-        );
-    }
-
     fn starts_operand(kind: &TokenKind) -> bool {
         matches!(
             kind,
@@ -188,15 +182,22 @@ impl<'a> Parser<'a> {
             return;
         }
         let span = previous.span().to(next.node.span());
-        let message = match self.implicit {
-            ImplicitOp::And => {
-                "Space-separated terms are combined with AND; use an explicit AND to make this clear"
-            }
-            ImplicitOp::Or => {
-                "Space-separated terms are combined with OR; use an explicit OR to make this clear"
-            }
+        let (message, operator) = match self.implicit {
+            ImplicitOp::And => (
+                "Space-separated terms are combined with AND; use an explicit AND to make this clear",
+                "AND",
+            ),
+            ImplicitOp::Or => (
+                "Space-separated terms are combined with OR; use an explicit OR to make this clear",
+                "OR",
+            ),
         };
-        self.warning("implicit-operator", message, span);
+        let gap = Range::from_offsets(self.source, previous.span().end, next.node.span().start);
+        self.diagnostics.push(
+            Diagnostic::warning(message, Range::from_span(self.source, span))
+                .with_code("implicit-operator")
+                .with_fix(format!("Insert {operator}"), gap, format!(" {operator} ")),
+        );
     }
 
     fn parse_not(&mut self) -> Option<Operand> {
@@ -291,10 +292,17 @@ impl<'a> Parser<'a> {
         while let Some(TokenKind::Boost(factor)) = self.peek() {
             let factor = *factor;
             let token = self.bump();
-            self.warning(
-                "boost-ignored",
-                "Boost (^) has no effect on matching and is ignored",
-                token.span,
+            self.diagnostics.push(
+                Diagnostic::warning(
+                    "Boost (^) has no effect on matching and is ignored",
+                    Range::from_span(self.source, token.span),
+                )
+                .with_code("boost-ignored")
+                .with_fix(
+                    "Remove boost",
+                    Range::from_span(self.source, token.span),
+                    "",
+                ),
             );
             let span = node.span().to(token.span);
             node = Node::Boost {
@@ -340,7 +348,19 @@ impl<'a> Parser<'a> {
                 let close = match self.peek() {
                     Some(TokenKind::RParen) => Some(self.bump().span),
                     _ => {
-                        self.error("unbalanced-paren", "Missing closing parenthesis", open);
+                        let end = self.source.len();
+                        self.diagnostics.push(
+                            Diagnostic::error(
+                                "Missing closing parenthesis",
+                                Range::from_span(self.source, open),
+                            )
+                            .with_code("unbalanced-paren")
+                            .with_fix(
+                                "Add closing parenthesis",
+                                Range::from_offsets(self.source, end, end),
+                                ")",
+                            ),
+                        );
                         None
                     }
                 };

@@ -10,6 +10,8 @@ export interface Diagnostic {
   source?: string
   /** Longer explanation or a suggested fix */
   relatedInfo?: string
+  /** Machine-applicable repair, when the fix is unambiguous */
+  fix?: Fix
 }
 
 export interface DiagnosticList {
@@ -22,6 +24,16 @@ export declare const enum DiagnosticSeverity {
   Info = 2,
   Warning = 4,
   Error = 8
+}
+
+/** A text edit an editor can apply to resolve the diagnostic */
+export interface Fix {
+  /** Short action label, e.g. "Insert AND" */
+  title: string
+  /** Text to replace (empty range = insertion) */
+  range: Range
+  /** Replacement text (empty = deletion) */
+  replacement: string
 }
 
 /**

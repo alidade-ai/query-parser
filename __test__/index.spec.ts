@@ -130,3 +130,26 @@ test("diagnostics carry editor positions", (t) => {
   t.truthy(error);
   t.is(error?.range.start.column, 11);
 });
+
+test("diagnostics carry applicable fixes", (t) => {
+  const [warning] = validate("apple banana").items;
+  t.is(warning?.code, "implicit-operator");
+  t.deepEqual(
+    {
+      title: warning?.fix?.title,
+      start: warning?.fix?.range.start.offset,
+      end: warning?.fix?.range.end.offset,
+      replacement: warning?.fix?.replacement,
+    },
+    { title: "Insert AND", start: 5, end: 6, replacement: " AND " },
+  );
+  const hint = validate("apple and banana").items.find(
+    (d: { code?: string }) => d.code === "lowercase-operator",
+  );
+  t.is(hint?.severity, 1);
+  t.is(hint?.fix?.replacement, "AND");
+  t.is(
+    validate("apple AND banana").items.find((d: { fix?: unknown }) => d.fix),
+    undefined,
+  );
+});

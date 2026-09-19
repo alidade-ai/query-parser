@@ -556,6 +556,96 @@ mod tests {
         assert_eq!(error.range.start.column, 11);
     }
 
+    fn fix_of(query: &str, code: &str) -> (u32, u32, String, String) {
+        let out = to_tinql(query, &TinqlOptions::default());
+        let diag = out
+            .diagnostics
+            .items
+            .iter()
+            .find(|d| d.code.as_deref() == Some(code))
+            .unwrap_or_else(|| panic!("{query:?}: no {code} in {:?}", out.diagnostics.items));
+        let fix = diag.fix.as_ref().expect("fix");
+        (
+            fix.range.start.offset,
+            fix.range.end.offset,
+            fix.replacement.clone(),
+            fix.title.clone(),
+        )
+    }
+
+    fn apply(query: &str, code: &str) -> String {
+        let (start, end, replacement, _) = fix_of(query, code);
+        format!(
+            "{}{}{}",
+            &query[..start as usize],
+            replacement,
+            &query[end as usize..]
+        )
+    }
+
+    #[test]
+    fn fixes_are_applicable_edits() {
+        assert_eq!(
+            apply("apple banana", "implicit-operator"),
+            "apple AND banana"
+        );
+        assert_eq!(
+            apply("apple\n  banana", "implicit-operator"),
+            "apple AND banana"
+        );
+        assert_eq!(
+            apply("apple and banana", "lowercase-operator"),
+            "apple AND banana"
+        );
+        assert_eq!(
+            apply("apple near/3 banana", "lowercase-operator"),
+            "apple NEAR/3 banana"
+        );
+        assert_eq!(apply("apple^2 AND pie", "boost-ignored"), "apple AND pie");
+        assert_eq!(
+            apply("\"apple\"~3 AND pie", "slop-no-effect"),
+            "\"apple\" AND pie"
+        );
+        assert_eq!(apply("content:apple", "field-ignored"), "apple");
+        assert_eq!(apply("(apple OR pie", "unbalanced-paren"), "(apple OR pie)");
+        assert_eq!(fix_of("apple banana", "implicit-operator").3, "Insert AND");
+        let out = to_tinql(
+            "apple banana",
+            &TinqlOptions {
+                conjunction_mode: Some(false),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            out.diagnostics.items[0].fix.as_ref().unwrap().replacement,
+            " OR "
+        );
+    }
+
+    #[test]
+    fn lowercase_operator_is_a_hint_only() {
+        let out = to_tinql("rock and roll", &TinqlOptions::default());
+        assert!(out.ok);
+        let hint = out
+            .diagnostics
+            .items
+            .iter()
+            .find(|d| d.code.as_deref() == Some("lowercase-operator"))
+            .unwrap();
+        assert_eq!(hint.severity, crate::DiagnosticSeverity::Hint);
+        assert_eq!(hint.range.start.offset, 5);
+        assert_eq!(hint.range.end.offset, 8);
+        assert!(codes("rock AND roll").is_empty());
+        assert!(!codes("\"rock and roll\"").contains(&"lowercase-operator".to_string()));
+    }
+
+    #[test]
+    fn slop_on_single_word_phrase_warns() {
+        assert_eq!(codes("\"apple\"~3"), vec!["slop-no-effect"]);
+        assert!(codes("\"apple pie\"~3").is_empty());
+        assert_eq!(tinql("\"apple\"~3"), "\"apple\"~3");
+    }
+
     #[test]
     fn boost_is_dropped_with_warning() {
         assert_eq!(tinql("apple^2 AND pie"), "apple AND pie");

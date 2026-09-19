@@ -359,7 +359,12 @@ impl<'a> Lexer<'a> {
                     ),
                     Range::from_offsets(self.source, start, start + colon + 1),
                 )
-                .with_code("field-ignored"),
+                .with_code("field-ignored")
+                .with_fix(
+                    "Remove field prefix",
+                    Range::from_offsets(self.source, start, start + colon + 1),
+                    "",
+                ),
             );
             text = text[colon + 1..].to_string();
         }

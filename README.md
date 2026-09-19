@@ -56,7 +56,10 @@ Options: `conjunctionMode` (default true; false makes a bare space mean OR),
 
 Diagnostics carry `severity` (8 error, 4 warning, 2 info, 1 hint), a stable
 `code`, and a `range` whose `line`/`column` are in UTF-16 units for editors and
-whose `offset` is a UTF-8 byte offset.
+whose `offset` is a UTF-8 byte offset. When the repair is unambiguous the
+diagnostic also carries a `fix` (`{ title, range, replacement }`) an editor can
+apply directly: insert the missing operator, upper-case `and`, drop an ignored
+boost or no-op `~N`, remove a field prefix, add a missing `)`.
 
 ### Diagnostic codes
 
@@ -69,7 +72,9 @@ letters or digits, would match nothing), `empty-wildcard`, `invalid-wildcard`,
 `invalid-boost`, `dangling-modifier`, `unexpected-token`.
 
 Warnings: `implicit-operator`, `leading-wildcard`, `short-wildcard`,
-`wildcard-in-phrase`, `boost-ignored`, `field-ignored`. Info: `literal-keyword`.
+`wildcard-in-phrase`, `slop-no-effect`, `boost-ignored`, `field-ignored`.
+Info: `literal-keyword`. Hint: `lowercase-operator` (`and` where `AND` was
+probably meant).
 
 ## Development
 

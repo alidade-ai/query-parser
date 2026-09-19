@@ -69,6 +69,18 @@ impl Range {
     }
 }
 
+/// A text edit an editor can apply to resolve the diagnostic
+#[napi(object)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Fix {
+    /// Short action label, e.g. "Insert AND"
+    pub title: String,
+    /// Text to replace (empty range = insertion)
+    pub range: Range,
+    /// Replacement text (empty = deletion)
+    pub replacement: String,
+}
+
 /// Diagnostic message with location and severity info
 #[napi(object)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,6 +93,8 @@ pub struct Diagnostic {
     pub source: Option<String>,
     /// Longer explanation or a suggested fix
     pub related_info: Option<String>,
+    /// Machine-applicable repair, when the fix is unambiguous
+    pub fix: Option<Fix>,
 }
 
 const SOURCE: &str = "alidade-query-parser";
@@ -94,6 +108,7 @@ impl Diagnostic {
             code: None,
             source: Some(SOURCE.to_string()),
             related_info: None,
+            fix: None,
         }
     }
 
@@ -120,6 +135,20 @@ impl Diagnostic {
 
     pub fn with_related_info(mut self, info: impl Into<String>) -> Self {
         self.related_info = Some(info.into());
+        self
+    }
+
+    pub fn with_fix(
+        mut self,
+        title: impl Into<String>,
+        range: Range,
+        replacement: impl Into<String>,
+    ) -> Self {
+        self.fix = Some(Fix {
+            title: title.into(),
+            range,
+            replacement: replacement.into(),
+        });
         self
     }
 }
