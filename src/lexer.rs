@@ -269,6 +269,21 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    fn field_ignored(&mut self, start: usize, len: usize) {
+        let range = Range::from_offsets(self.source, start, start + len);
+        self.diagnostics.push(
+            Diagnostic::warning(
+                format!(
+                    "Field prefix \"{}\" is ignored; all terms search post content",
+                    &self.source[start..start + len]
+                ),
+                range,
+            )
+            .with_code("field-ignored")
+            .with_fix("Remove field prefix", range, ""),
+        );
+    }
+
     fn word(&mut self) {
         let start = self.pos;
         let mut text = String::new();
@@ -346,26 +361,15 @@ impl<'a> Lexer<'a> {
             }
         }
 
-        let field_end = raw.find(':');
-        if let Some(colon) = field_end
+        if let Some(colon) = raw.find(':')
             && KNOWN_FIELDS.contains(&&raw[..colon])
-            && colon + 1 < raw.len()
         {
-            self.diagnostics.push(
-                Diagnostic::warning(
-                    format!(
-                        "Field prefix \"{}\" is ignored; all terms search post content",
-                        &raw[..=colon]
-                    ),
-                    Range::from_offsets(self.source, start, start + colon + 1),
-                )
-                .with_code("field-ignored")
-                .with_fix(
-                    "Remove field prefix",
-                    Range::from_offsets(self.source, start, start + colon + 1),
-                    "",
-                ),
-            );
+            self.field_ignored(start, colon + 1);
+            if colon + 1 == raw.len() {
+                // `content:"x y"`, `content:(a OR b)`, `content: apple`: the
+                // prefix stands alone and attaches to whatever follows.
+                return;
+            }
             text = text[colon + 1..].to_string();
         }
 
@@ -613,21 +617,37 @@ mod tests {
     #[test]
     fn field_prefix_is_stripped_with_warning() {
         let lexed = lex("content_exact:apple content:\"x\" user@host:port");
-        assert_eq!(lexed.diagnostics.codes(), vec!["field-ignored"]);
+        assert_eq!(
+            lexed.diagnostics.codes(),
+            vec!["field-ignored", "field-ignored"]
+        );
         assert_eq!(lexed.tokens[0].kind, word("apple"));
         assert_eq!(
             lexed.tokens[1].kind,
-            word("content:\"x\"").clone_without_quotes()
+            TokenKind::Phrase {
+                text: "x".into(),
+                slop: None
+            }
         );
-        assert_eq!(lexed.tokens[3].kind, word("user@host:port"));
+        assert_eq!(lexed.tokens[2].kind, word("user@host:port"));
     }
 
-    impl TokenKind {
-        fn clone_without_quotes(&self) -> TokenKind {
-            // `content:"x"` lexes as the word `content:` followed by a phrase; the
-            // field prefix only applies to attached words.
-            word("content:")
-        }
+    #[test]
+    fn detached_field_prefix_attaches_to_what_follows() {
+        assert_eq!(
+            kinds("content:(apple OR pie) content: cherry"),
+            vec![
+                TokenKind::LParen,
+                word("apple"),
+                TokenKind::Or,
+                word("pie"),
+                TokenKind::RParen,
+                word("cherry")
+            ]
+        );
+        let lexed = lex("content:");
+        assert!(lexed.tokens.is_empty());
+        assert_eq!(lexed.diagnostics.codes(), vec!["field-ignored"]);
     }
 
     #[test]

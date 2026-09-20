@@ -468,6 +468,11 @@ mod tests {
             "apple AND banana"
         );
         assert_eq!(codes("content:apple"), vec!["field-ignored"]);
+        assert_eq!(
+            tinql("content:\"x y\" AND content:(a OR b)"),
+            "\"x y\" AND (a OR b)"
+        );
+        assert_eq!(apply("content:\"x y\"", "field-ignored"), "\"x y\"");
     }
 
     #[test]
