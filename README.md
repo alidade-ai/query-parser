@@ -20,19 +20,19 @@ Every function runs the same pipeline (lex → parse → lint → emit), so a qu
 
 ## Query language
 
-| Syntax                           | Meaning                                                                                                            |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `climate policy`                 | Both terms (a space means AND; warned as `implicit-operator`)                                                      |
-| `a AND b`, `a OR b`              | Boolean operators, UPPER CASE only; `and`/`or` are ordinary words                                                  |
-| `NOT a`, `-a`, `a NOT b`         | Exclusion; emitted as TINQL `AND NOT`                                                                              |
-| `(a OR b) AND c`                 | Grouping. AND binds tighter than OR, but mixing them at one level without parentheses is an error (`mixed-and-or`) |
-| `"health care"`, `'health care'` | Exact phrase (adjacent, in order)                                                                                  |
-| `"health care"~3`                | Phrase with up to 3 extra words between its terms, any phrase length; order-sensitive                              |
-| `appl*`, `p?ach`                 | Wildcards: `*` = any characters, `?` = one character. `\*` / `\?` for the literal characters                       |
-| `apple~1`, `apple~0:2`           | Fuzzy match within an edit distance (default max 2), optional fixed prefix length                                  |
-| `a NEAR/3 b`                     | Both within 3 extra words of each other, either order                                                              |
-| `a THEN/3 b`                     | `a` followed by `b` within 3 extra words                                                                           |
-| `"AND"`, `"TO"`                  | Quote an UPPER CASE keyword to search for the word                                                                 |
+| Syntax                           | Meaning                                                                                                             |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `climate policy`                 | Both terms (a space means AND; warned as `implicit-operator`)                                                       |
+| `a AND b`, `a OR b`              | Boolean operators, UPPER CASE only; `and`/`or` are ordinary words                                                   |
+| `NOT a`, `-a`, `a NOT b`         | Exclusion; emitted as TINQL `AND NOT`                                                                               |
+| `(a OR b) AND c`                 | Grouping. AND binds tighter than OR, but mixing them at one level without parentheses is an error (`mixed-and-or`)  |
+| `"health care"`, `'health care'` | Exact phrase (adjacent, in order)                                                                                   |
+| `"health care"~3`                | Phrase with up to 3 extra words between its terms, any phrase length; order-sensitive                               |
+| `appl*`, `p?ach`                 | Wildcards: `*` = any characters, `?` = one character. `\*` / `\?` for the literal characters                        |
+| `apple~1`, `apple~0:2`           | Fuzzy match within an edit distance (default max 2), optional fixed prefix length                                   |
+| `a NEAR/3 b`                     | Both within 3 extra words of each other, either order; binds tighter than AND/OR (warned as `mixed-near` when bare) |
+| `a THEN/3 b`                     | `a` followed by `b` within 3 extra words                                                                            |
+| `"AND"`, `"TO"`                  | Quote an UPPER CASE keyword to search for the word                                                                  |
 
 Matching is case- and accent-insensitive with no stemming; punctuation splits
 words the way TIN's tokenizer does (`covid-19` is the phrase `covid 19`,
@@ -71,8 +71,10 @@ letters or digits, would match nothing), `empty-wildcard`, `invalid-wildcard`,
 `invalid-proximity` (`NEAR` without `/N`), `negation-in-proximity`,
 `invalid-boost`, `dangling-modifier`, `unexpected-token`.
 
-Warnings: `implicit-operator`, `leading-wildcard`, `short-wildcard` (`a*`),
-`wildcard-in-phrase`, `slop-no-effect`, `boost-ignored`, `field-ignored`.
+Warnings: `implicit-operator`, `mixed-near` (a bare `NEAR`/`THEN` next to
+`AND`/`OR`; the fix adds the parentheses that spell out the grouping used),
+`leading-wildcard`, `short-wildcard` (`a*`), `wildcard-in-phrase`,
+`slop-no-effect`, `boost-ignored`, `field-ignored`.
 Info: `literal-keyword`. Hint: `lowercase-operator` (`and` where `AND` was
 probably meant).
 

@@ -93,6 +93,12 @@ impl Linter<'_> {
                     {
                         self.mixed_and_or(child, parts);
                     }
+                    self.mixed_near(child, "OR");
+                }
+            }
+            Node::And { children, .. } => {
+                for child in children {
+                    self.mixed_near(child, "AND");
                 }
             }
             Node::Proximity { left, right, .. } => {
@@ -106,7 +112,7 @@ impl Linter<'_> {
                     }
                 }
             }
-            Node::Group { .. } | Node::Not { .. } | Node::And { .. } | Node::Boost { .. } => {}
+            Node::Group { .. } | Node::Not { .. } | Node::Boost { .. } => {}
         }
         let inner_proximity = in_proximity || matches!(node, Node::Proximity { .. });
         for child in node.children() {
@@ -141,6 +147,29 @@ impl Linter<'_> {
             "Mixing AND (or NOT) with OR at the same level relies on operator precedence; \
              add parentheses to make the grouping explicit",
             and,
+        );
+    }
+
+    /// A bare NEAR/THEN directly under AND or OR binds tighter than the
+    /// surrounding operator, which is easy to misread; offer the parentheses
+    /// that spell out the grouping actually used.
+    fn mixed_near(&mut self, child: &Node, operator: &str) {
+        let Node::Proximity { ordered, .. } = child else {
+            return;
+        };
+        let name = if *ordered { "THEN" } else { "NEAR" };
+        let range = Range::from_span(self.source, child.span());
+        let text = &self.source[child.span().start..child.span().end];
+        self.push(
+            Diagnostic::warning(
+                format!(
+                    "{name} binds tighter than {operator}, so this is read as ({text}); \
+                     add parentheses to make the grouping explicit"
+                ),
+                range,
+            )
+            .with_code("mixed-near")
+            .with_fix("Add parentheses", range, format!("({text})")),
         );
     }
 
@@ -321,6 +350,36 @@ impl Linter<'_> {
 }
 
 #[cfg(test)]
+mod mixed_near {
+    use crate::tinql::{TinqlOptions, to_tinql};
+
+    #[test]
+    fn fix_wraps_the_proximity_expression() {
+        let out = to_tinql("test OR Test NEAR/5 test OR test", &TinqlOptions::default());
+        assert_eq!(
+            out.tinql.as_deref(),
+            Some("test OR (Test NEAR/5 test) OR test")
+        );
+        let [diag] = out.diagnostics.items.as_slice() else {
+            panic!("{:?}", out.diagnostics.items);
+        };
+        assert_eq!(diag.code.as_deref(), Some("mixed-near"));
+        assert_eq!(diag.range.start.offset, 8);
+        assert_eq!(diag.range.end.offset, 24);
+        let fix = diag.fix.as_ref().unwrap();
+        assert_eq!(fix.replacement, "(Test NEAR/5 test)");
+        assert_eq!(fix.range.start.offset, 8);
+        assert_eq!(fix.range.end.offset, 24);
+    }
+
+    #[test]
+    fn every_bare_proximity_operand_is_reported() {
+        let out = to_tinql("a NEAR/2 b AND c THEN/1 d", &TinqlOptions::default());
+        assert_eq!(out.diagnostics.codes(), vec!["mixed-near", "mixed-near"]);
+    }
+}
+
+#[cfg(test)]
 mod rule_table {
     use crate::diagnostics::DiagnosticSeverity;
     use crate::tinql::{TinqlOptions, to_tinql};
@@ -416,6 +475,31 @@ mod rule_table {
             "implicit and",
         ),
         ("apple -banana", Expect::Clean, "minus needs no operator"),
+        (
+            "apple OR banana NEAR/5 cherry",
+            Expect::Warn("mixed-near"),
+            "near under or",
+        ),
+        (
+            "apple AND banana THEN/2 cherry",
+            Expect::Warn("mixed-near"),
+            "then under and",
+        ),
+        (
+            "apple OR (banana NEAR/5 cherry)",
+            Expect::Clean,
+            "grouped near under or",
+        ),
+        (
+            "(apple OR banana) NEAR/5 cherry",
+            Expect::Clean,
+            "grouped or inside near",
+        ),
+        (
+            "apple NEAR/3 banana THEN/0 cherry",
+            Expect::Clean,
+            "chained proximity",
+        ),
         (
             "apple and banana",
             Expect::Hint("lowercase-operator"),
