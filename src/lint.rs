@@ -1,5 +1,6 @@
 use crate::ast::{Node, Span};
 use crate::diagnostics::{Diagnostic, DiagnosticList, Range};
+use crate::lexer::lex;
 use crate::tinql::{TIN_KEYWORDS, needs_quoting};
 
 pub struct LintOptions {
@@ -126,7 +127,7 @@ impl Linter<'_> {
     fn mixed_and_or(&mut self, and: &Node, parts: &[Node]) {
         for pair in parts.windows(2) {
             let gap = Span::new(pair[0].span().end, pair[1].span().start);
-            if self.source[gap.start..gap.end].trim().is_empty() && !pair[1].is_negation() {
+            if lex(&self.source[gap.start..gap.end]).tokens.is_empty() && !pair[1].is_negation() {
                 let left = &self.source[pair[0].span().start..pair[0].span().end];
                 let right = &self.source[pair[1].span().start..pair[1].span().end];
                 self.push(

@@ -9,6 +9,7 @@ mod tinql;
 pub use ast::*;
 pub use diagnostics::*;
 pub use format::format_node;
+pub use lexer::strip_comments as remove_comments;
 pub use lint::{LintOptions, lint};
 pub use parser::{ImplicitOp, Parsed, parse as parse_query};
 pub use tinql::{Analysis, TinqlOptions, TinqlOutput, analyze, to_tinql as emit_tinql};
@@ -85,6 +86,13 @@ pub fn format(query: String, options: Option<TinqlOptions>) -> Option<String> {
 #[napi]
 pub fn to_tinql(query: String, options: Option<TinqlOptions>) -> TinqlOutput {
     emit_tinql(&query, &options.unwrap_or_default())
+}
+
+/// Remove `//` and `<<< >>>` comments, for splicing a query into a larger
+/// one or showing it without annotations. An unterminated `<<<` is kept.
+#[napi]
+pub fn strip_comments(query: String) -> String {
+    remove_comments(&query)
 }
 
 /// Get the version of the parser library

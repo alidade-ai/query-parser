@@ -107,6 +107,12 @@ export interface Range {
   end: Position
 }
 
+/**
+ * Remove `//` and `<<< >>>` comments, for splicing a query into a larger
+ * one or showing it without annotations. An unterminated `<<<` is kept.
+ */
+export declare function stripComments(query: string): string
+
 /** Options for analysis and TINQL emission */
 export interface TinqlOptions {
   /** Treat bare adjacent terms as AND (true, default) or OR (false). */

@@ -33,6 +33,7 @@ pub fn parse(source: &str, implicit: ImplicitOp) -> Parsed {
     let Lexed {
         tokens,
         diagnostics,
+        ..
     } = lex(source);
     let mut parser = Parser {
         source,
@@ -192,11 +193,22 @@ impl<'a> Parser<'a> {
                 "OR",
             ),
         };
-        let gap = Range::from_offsets(self.source, previous.span().end, next.node.span().start);
+        let (start, end) = (previous.span().end, next.node.span().start);
+        let (gap, replacement) = if self.source[start..end].trim().is_empty() {
+            (
+                Range::from_offsets(self.source, start, end),
+                format!(" {operator} "),
+            )
+        } else {
+            (
+                Range::from_offsets(self.source, start, start),
+                format!(" {operator}"),
+            )
+        };
         self.diagnostics.push(
             Diagnostic::warning(message, Range::from_span(self.source, span))
                 .with_code("implicit-operator")
-                .with_fix(format!("Insert {operator}"), gap, format!(" {operator} ")),
+                .with_fix(format!("Insert {operator}"), gap, replacement),
         );
     }
 
@@ -348,7 +360,7 @@ impl<'a> Parser<'a> {
                 let close = match self.peek() {
                     Some(TokenKind::RParen) => Some(self.bump().span),
                     _ => {
-                        let end = self.source.len();
+                        let end = self.tokens.last().map_or(open.end, |t| t.span.end);
                         self.diagnostics.push(
                             Diagnostic::error(
                                 "Missing closing parenthesis",

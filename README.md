@@ -33,6 +33,7 @@ Every function runs the same pipeline (lex → parse → lint → emit), so a qu
 | `a NEAR/3 b`                     | Both within 3 extra words of each other, either order; binds tighter than AND/OR (warned as `mixed-near` when bare) |
 | `a THEN/3 b`                     | `a` followed by `b` within 3 extra words                                                                            |
 | `"AND"`, `"TO"`                  | Quote an UPPER CASE keyword to search for the word                                                                  |
+| `// note`, `<<<note>>>`          | Comments: `//` runs to the end of the line, `<<< >>>` (Brandwatch style) can sit mid-line or span lines             |
 
 Matching is case- and accent-insensitive with no stemming; punctuation splits
 words the way TIN's tokenizer does (`covid-19` is the phrase `covid 19`,
@@ -50,6 +51,8 @@ warning. Square brackets, ranges and match-all `*` are rejected.
 - `validate(query, options?)` → `DiagnosticList`; `isValid(query, options?)`.
 - `format(query, options?)` → canonical text with explicit operators, or null.
 - `getStats(query, options?)` → term count, depth, feature flags.
+- `stripComments(query)` → the query without comments, for splicing it into a
+  larger query (a trailing `//` would swallow a closing parenthesis).
 
 Options: `conjunctionMode` (default true; false makes a bare space mean OR),
 `maxSlop` (default 20), `maxFuzzyDistance` (default 2).
@@ -59,7 +62,7 @@ Diagnostics carry `severity` (8 error, 4 warning, 2 info, 1 hint), a stable
 whose `offset` is a UTF-8 byte offset. When the repair is unambiguous the
 diagnostic also carries a `fix` (`{ title, range, replacement }`) an editor can
 apply directly: insert the missing operator, upper-case `and`, drop an ignored
-boost or no-op `~N`, remove a field prefix, add a missing `)`.
+boost or no-op `~N`, remove a field prefix, add a missing `)` or `>>>`.
 
 ### Diagnostic codes
 
@@ -69,7 +72,8 @@ Errors (query is rejected): `bare-operator`, `mixed-and-or`, `unbalanced-paren`,
 letters or digits, would match nothing), `empty-wildcard`, `invalid-wildcard`,
 `invalid-fuzzy`, `fuzzy-too-large`, `invalid-slop`, `slop-too-large`,
 `invalid-proximity` (`NEAR` without `/N`), `negation-in-proximity`,
-`invalid-boost`, `dangling-modifier`, `unexpected-token`.
+`invalid-boost`, `dangling-modifier`, `unterminated-comment` (`<<<` without
+`>>>`), `stray-comment-end`, `unexpected-token`.
 
 Warnings: `implicit-operator`, `mixed-near` (a bare `NEAR`/`THEN` next to
 `AND`/`OR`; the fix adds the parentheses that spell out the grouping used),

@@ -1,7 +1,8 @@
 import test from "ava";
 import binding from "./binding.cjs";
 
-const { parse, validate, isValid, format, getStats, toTinql } = binding;
+const { parse, validate, isValid, format, getStats, toTinql, stripComments } =
+  binding;
 
 const codes = (query: string) =>
   validate(query).items.map((d: { code?: string }) => d.code);
@@ -114,6 +115,16 @@ test("operators followed by a newline, CRLF, or tab still bind", (t) => {
     );
     t.is(and.diagnostics.items.length, 0, JSON.stringify(sep));
   }
+});
+
+test("comments are ignored", (t) => {
+  t.is(
+    toTinql("apple AND\n// banana OR\npie <<<dessert>>>").tinql,
+    "apple AND pie",
+  );
+  t.deepEqual(codes("apple <<<oops"), ["unterminated-comment"]);
+  t.true(isValid("https://example.com"));
+  t.is(stripComments("(apple // note\n)<<<x>>>pie"), "(apple \n) pie");
 });
 
 test("diagnostics carry editor positions", (t) => {

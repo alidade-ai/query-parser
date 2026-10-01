@@ -4,6 +4,10 @@ use crate::diagnostics::{Diagnostic, DiagnosticList, Range};
 /// Legacy field prefixes accepted and dropped with a warning.
 const KNOWN_FIELDS: [&str; 2] = ["content_exact", "content"];
 
+const LINE_COMMENT: &str = "//";
+const BLOCK_COMMENT_OPEN: &str = "<<<";
+const BLOCK_COMMENT_CLOSE: &str = ">>>";
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     Word {
@@ -62,6 +66,7 @@ pub struct Token {
 
 pub struct Lexed {
     pub tokens: Vec<Token>,
+    pub comments: Vec<Span>,
     pub diagnostics: DiagnosticList,
 }
 
@@ -82,6 +87,7 @@ struct Lexer<'a> {
     source: &'a str,
     pos: usize,
     tokens: Vec<Token>,
+    comments: Vec<Span>,
     diagnostics: DiagnosticList,
 }
 
@@ -90,13 +96,31 @@ pub fn lex(source: &str) -> Lexed {
         source,
         pos: 0,
         tokens: Vec::new(),
+        comments: Vec::new(),
         diagnostics: DiagnosticList::new(),
     };
     lexer.run();
     Lexed {
         tokens: lexer.tokens,
+        comments: lexer.comments,
         diagnostics: lexer.diagnostics,
     }
+}
+
+/// The query with its comments removed. A block comment becomes one space so
+/// the words around it stay apart; a line comment keeps its newline.
+pub fn strip_comments(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut last = 0;
+    for span in lex(source).comments {
+        out.push_str(&source[last..span.start]);
+        if source[span.start..].starts_with(BLOCK_COMMENT_OPEN) {
+            out.push(' ');
+        }
+        last = span.end;
+    }
+    out.push_str(&source[last..]);
+    out
 }
 
 impl<'a> Lexer<'a> {
@@ -106,6 +130,10 @@ impl<'a> Lexer<'a> {
 
     fn peek_at(&self, offset: usize) -> Option<char> {
         self.source[self.pos..].chars().nth(offset)
+    }
+
+    fn rest(&self) -> &'a str {
+        &self.source[self.pos..]
     }
 
     fn bump(&mut self) -> Option<char> {
@@ -133,6 +161,18 @@ impl<'a> Lexer<'a> {
             let start = self.pos;
             if c.is_whitespace() {
                 self.bump();
+                continue;
+            }
+            if self.rest().starts_with(LINE_COMMENT) {
+                self.line_comment();
+                continue;
+            }
+            if self.rest().starts_with(BLOCK_COMMENT_OPEN) {
+                self.block_comment();
+                continue;
+            }
+            if self.rest().starts_with(BLOCK_COMMENT_CLOSE) {
+                self.stray_comment_close();
                 continue;
             }
             match c {
@@ -177,6 +217,49 @@ impl<'a> Lexer<'a> {
                 _ => self.word(),
             }
         }
+    }
+
+    /// `//` at a token start runs to the end of the line; inside a word
+    /// (`https://…`) it is term text.
+    fn line_comment(&mut self) {
+        let start = self.pos;
+        self.pos += self.rest().find('\n').unwrap_or(self.rest().len());
+        self.comments.push(Span::new(start, self.pos));
+    }
+
+    /// Brandwatch-style `<<< … >>>`, may span lines, does not nest.
+    fn block_comment(&mut self) {
+        let start = self.pos;
+        let body = start + BLOCK_COMMENT_OPEN.len();
+        match self.source[body..].find(BLOCK_COMMENT_CLOSE) {
+            Some(close) => {
+                self.pos = body + close + BLOCK_COMMENT_CLOSE.len();
+                self.comments.push(Span::new(start, self.pos));
+            }
+            None => {
+                self.pos = self.source.len();
+                let end = Range::from_offsets(self.source, self.pos, self.pos);
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        "Missing >>> to close this comment",
+                        Range::from_offsets(self.source, start, body),
+                    )
+                    .with_code("unterminated-comment")
+                    .with_fix("Close comment", end, BLOCK_COMMENT_CLOSE),
+                );
+            }
+        }
+    }
+
+    fn stray_comment_close(&mut self) {
+        let start = self.pos;
+        self.pos += BLOCK_COMMENT_CLOSE.len();
+        let range = Range::from_offsets(self.source, start, self.pos);
+        self.diagnostics.push(
+            Diagnostic::error("Comment end >>> has no opening <<<", range)
+                .with_code("stray-comment-end")
+                .with_fix("Remove >>>", range, ""),
+        );
     }
 
     /// A single quote opens a phrase only at a token start; apostrophes inside
@@ -290,7 +373,7 @@ impl<'a> Lexer<'a> {
         let mut wildcard = false;
         let mut escaped_any = false;
         while let Some(c) = self.peek() {
-            if is_boundary(c) {
+            if is_boundary(c) || self.rest().starts_with(BLOCK_COMMENT_OPEN) {
                 break;
             }
             self.bump();
@@ -658,6 +741,64 @@ mod tests {
             lexed.diagnostics.codes(),
             vec!["dangling-modifier", "invalid-boost"]
         );
+    }
+
+    #[test]
+    fn line_comments_run_to_end_of_line() {
+        assert_eq!(
+            kinds("apple // fruit\n// banana OR\n(pie//x\n)"),
+            vec![
+                word("apple"),
+                TokenKind::LParen,
+                word("pie//x"),
+                TokenKind::RParen
+            ]
+        );
+        assert_eq!(
+            kinds("https://example.com"),
+            vec![word("https://example.com")]
+        );
+        assert_eq!(
+            kinds("\"a // b\""),
+            vec![TokenKind::Phrase {
+                text: "a // b".into(),
+                slop: None
+            }]
+        );
+    }
+
+    #[test]
+    fn block_comments_span_lines_and_split_words() {
+        let lexed = lex("apple<<<note>>>AND <<<multi\nline OR>>> pie");
+        assert!(lexed.diagnostics.is_empty());
+        assert_eq!(
+            lexed
+                .tokens
+                .iter()
+                .map(|t| t.kind.clone())
+                .collect::<Vec<_>>(),
+            vec![word("apple"), TokenKind::And, word("pie")]
+        );
+        assert_eq!(lexed.tokens[2].span, Span::new(39, 42));
+    }
+
+    #[test]
+    fn strip_comments_keeps_words_apart() {
+        assert_eq!(
+            strip_comments("apple<<<x>>>pie // note\nOR \"a // b\" https://x.com"),
+            "apple pie \nOR \"a // b\" https://x.com"
+        );
+        assert_eq!(strip_comments("apple <<<open"), "apple <<<open");
+    }
+
+    #[test]
+    fn unbalanced_block_comments_are_errors() {
+        let lexed = lex("apple <<<oops");
+        assert_eq!(lexed.diagnostics.codes(), vec!["unterminated-comment"]);
+        assert_eq!(lexed.tokens.len(), 1);
+        let lexed = lex("apple >>> pie");
+        assert_eq!(lexed.diagnostics.codes(), vec!["stray-comment-end"]);
+        assert_eq!(lexed.tokens.len(), 2);
     }
 
     #[test]

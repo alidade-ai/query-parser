@@ -628,6 +628,35 @@ mod tests {
     }
 
     #[test]
+    fn comments_are_ignored() {
+        assert_eq!(
+            tinql("apple AND\n// banana AND\npie <<<dessert>>>"),
+            "apple AND pie"
+        );
+        assert_eq!(errors("// apple\n<<<pie>>>"), vec!["empty-query"]);
+        assert_eq!(
+            apply("apple // fruit\npie", "implicit-operator"),
+            "apple AND // fruit\npie"
+        );
+        assert_eq!(
+            apply("(apple OR pie // fruit", "unbalanced-paren"),
+            "(apple OR pie) // fruit"
+        );
+        assert_eq!(apply("apple <<<x", "unterminated-comment"), "apple <<<x>>>");
+        assert_eq!(
+            apply("apple >>> AND pie", "stray-comment-end"),
+            "apple  AND pie"
+        );
+        assert_eq!(errors("apple <<<x>>> pie OR cherry"), vec!["mixed-and-or"]);
+        let out = to_tinql("apple <<<x>>> pie OR cherry", &TinqlOptions::default());
+        assert!(
+            out.diagnostics.items[0]
+                .message
+                .starts_with("Missing operator")
+        );
+    }
+
+    #[test]
     fn lowercase_operator_is_a_hint_only() {
         let out = to_tinql("rock and roll", &TinqlOptions::default());
         assert!(out.ok);
