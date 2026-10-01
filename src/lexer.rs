@@ -70,6 +70,10 @@ pub struct Lexed {
     pub diagnostics: DiagnosticList,
 }
 
+fn is_line_end(c: char) -> bool {
+    matches!(c, '\n' | '\r')
+}
+
 fn is_boundary(c: char) -> bool {
     c.is_whitespace() || matches!(c, '(' | ')' | '[' | ']' | '"' | '~' | '^')
 }
@@ -108,13 +112,18 @@ pub fn lex(source: &str) -> Lexed {
 }
 
 /// The query with its comments removed. A block comment becomes one space so
-/// the words around it stay apart; a line comment keeps its newline.
+/// the words around it stay apart; a line comment keeps its line break.
 pub fn strip_comments(source: &str) -> String {
     let mut out = String::with_capacity(source.len());
     let mut last = 0;
     for span in lex(source).comments {
         out.push_str(&source[last..span.start]);
         if source[span.start..].starts_with(BLOCK_COMMENT_OPEN) {
+            // A dangling backslash would otherwise escape the space.
+            let backslashes = out.chars().rev().take_while(|&c| c == '\\').count();
+            if backslashes % 2 == 1 {
+                out.push('\\');
+            }
             out.push(' ');
         }
         last = span.end;
@@ -223,7 +232,7 @@ impl<'a> Lexer<'a> {
     /// (`https://…`) it is term text.
     fn line_comment(&mut self) {
         let start = self.pos;
-        self.pos += self.rest().find('\n').unwrap_or(self.rest().len());
+        self.pos += self.rest().find(is_line_end).unwrap_or(self.rest().len());
         self.comments.push(Span::new(start, self.pos));
     }
 
@@ -245,7 +254,11 @@ impl<'a> Lexer<'a> {
                         Range::from_offsets(self.source, start, body),
                     )
                     .with_code("unterminated-comment")
-                    .with_fix("Close comment", end, BLOCK_COMMENT_CLOSE),
+                    .with_fix(
+                        "Close comment",
+                        end,
+                        format!(" {BLOCK_COMMENT_CLOSE}"),
+                    ),
                 );
             }
         }
@@ -266,10 +279,41 @@ impl<'a> Lexer<'a> {
     /// words (o'brien) are term characters.
     fn single_quote_opens_phrase(&self) -> bool {
         let rest = &self.source[self.pos + 1..];
-        rest.contains('\'')
+        let mut i = 0;
+        let mut prev = '\'';
+        while let Some(c) = rest[i..].chars().next() {
+            let tail = &rest[i..];
+            if tail.starts_with(BLOCK_COMMENT_OPEN) {
+                match tail.find(BLOCK_COMMENT_CLOSE) {
+                    Some(close) => i += close + BLOCK_COMMENT_CLOSE.len(),
+                    None => return false,
+                }
+                prev = ' ';
+                continue;
+            }
+            if tail.starts_with(LINE_COMMENT) && (prev.is_whitespace() || is_boundary(prev)) {
+                i += tail.find(is_line_end).unwrap_or(tail.len());
+                prev = ' ';
+                continue;
+            }
+            if c == '\'' {
+                return true;
+            }
+            prev = c;
+            i += c.len_utf8();
+        }
+        false
+    }
+
+    fn starts_comment(&self, offset: usize) -> bool {
+        let rest = &self.source[offset..];
+        rest.starts_with(LINE_COMMENT) || rest.starts_with(BLOCK_COMMENT_OPEN)
     }
 
     fn sign_starts_operand(&self) -> bool {
+        if self.starts_comment(self.pos + 1) {
+            return false;
+        }
         match self.peek_at(1) {
             None => false,
             Some(next) => !next.is_whitespace() && !matches!(next, ')' | ']' | '~' | '^' | '['),
@@ -789,6 +833,7 @@ mod tests {
             "apple pie \nOR \"a // b\" https://x.com"
         );
         assert_eq!(strip_comments("apple <<<open"), "apple <<<open");
+        assert_eq!(strip_comments(r"apple\<<<x>>>pie"), r"apple\\ pie");
     }
 
     #[test]

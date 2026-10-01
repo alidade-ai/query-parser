@@ -642,7 +642,22 @@ mod tests {
             apply("(apple OR pie // fruit", "unbalanced-paren"),
             "(apple OR pie) // fruit"
         );
-        assert_eq!(apply("apple <<<x", "unterminated-comment"), "apple <<<x>>>");
+        assert_eq!(
+            apply("apple <<<x", "unterminated-comment"),
+            "apple <<<x >>>"
+        );
+        assert_eq!(
+            apply("apple <<<note>>", "unterminated-comment"),
+            "apple <<<note>> >>>"
+        );
+        assert!(errors(&apply("apple <<<note>>", "unterminated-comment")).is_empty());
+        assert_eq!(
+            apply("\"apple\"// fruit\npie", "implicit-operator"),
+            "\"apple\" AND // fruit\npie"
+        );
+        assert_eq!(tinql("'90s // it's\nmusic"), "'90s AND music");
+        assert_eq!(errors("-<<<x>>>apple"), errors("- apple"));
+        assert_eq!(tinql("apple // x\rpie"), "apple AND pie");
         assert_eq!(
             apply("apple >>> AND pie", "stray-comment-end"),
             "apple  AND pie"

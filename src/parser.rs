@@ -194,15 +194,22 @@ impl<'a> Parser<'a> {
             ),
         };
         let (start, end) = (previous.span().end, next.node.span().start);
-        let (gap, replacement) = if self.source[start..end].trim().is_empty() {
+        let between = &self.source[start..end];
+        let (gap, replacement) = if between.trim().is_empty() {
             (
                 Range::from_offsets(self.source, start, end),
                 format!(" {operator} "),
             )
         } else {
+            // Keep the comment in the gap; it must not touch the operator.
+            let separator = if between.starts_with(char::is_whitespace) {
+                ""
+            } else {
+                " "
+            };
             (
                 Range::from_offsets(self.source, start, start),
-                format!(" {operator}"),
+                format!(" {operator}{separator}"),
             )
         };
         self.diagnostics.push(
