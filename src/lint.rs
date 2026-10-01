@@ -475,7 +475,16 @@ mod rule_table {
             Expect::Warn("implicit-operator"),
             "implicit and",
         ),
-        ("apple -banana", Expect::Clean, "minus needs no operator"),
+        (
+            "apple -banana",
+            Expect::Error("sign-operator"),
+            "minus is not NOT",
+        ),
+        (
+            "+apple",
+            Expect::Error("sign-operator"),
+            "plus is not an operator",
+        ),
         (
             "apple OR banana NEAR/5 cherry",
             Expect::Warn("mixed-near"),

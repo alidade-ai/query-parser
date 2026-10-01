@@ -33,7 +33,8 @@ test("isValid", (t) => {
 
 test("format normalizes query", (t) => {
   t.is(format("foo bar"), "foo AND bar");
-  t.is(format("foo -bar"), "foo AND NOT bar");
+  t.is(format("foo NOT bar"), "foo AND NOT bar");
+  t.is(format("foo -bar"), null);
   t.is(format("(foo"), null);
 });
 
@@ -41,6 +42,7 @@ test("validate returns diagnostics", (t) => {
   t.deepEqual(codes("foo AND bar"), []);
   t.deepEqual(codes("foo bar"), ["implicit-operator"]);
   t.deepEqual(codes("foo AND bar OR baz"), ["mixed-and-or"]);
+  t.deepEqual(codes("foo AND -bar"), ["sign-operator"]);
 });
 
 test("getStats reports features", (t) => {

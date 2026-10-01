@@ -25,8 +25,6 @@ pub enum TokenKind {
     Not,
     Near(Option<u32>),
     Then(Option<u32>),
-    Plus,
-    Minus,
     LParen,
     RParen,
     LBracket,
@@ -47,8 +45,6 @@ impl TokenKind {
             TokenKind::Near(None) => "NEAR".into(),
             TokenKind::Then(Some(n)) => format!("THEN/{n}"),
             TokenKind::Then(None) => "THEN".into(),
-            TokenKind::Plus => "+".into(),
-            TokenKind::Minus => "-".into(),
             TokenKind::LParen => "(".into(),
             TokenKind::RParen => ")".into(),
             TokenKind::LBracket => "[".into(),
@@ -214,15 +210,7 @@ impl<'a> Lexer<'a> {
                         self.pos,
                     );
                 }
-                '+' | '-' if self.sign_starts_operand() => {
-                    self.bump();
-                    let kind = if c == '+' {
-                        TokenKind::Plus
-                    } else {
-                        TokenKind::Minus
-                    };
-                    self.push(kind, start);
-                }
+                '+' | '-' if self.sign_starts_operand() => self.sign(c),
                 _ => self.word(),
             }
         }
@@ -394,6 +382,26 @@ impl<'a> Lexer<'a> {
                 self.pos,
             ),
         }
+    }
+
+    fn sign(&mut self, sign: char) {
+        let start = self.pos;
+        self.bump();
+        let range = Range::from_offsets(self.source, start, self.pos);
+        let (message, title, replacement) = if sign == '-' {
+            ("Use NOT to exclude a term", "Replace - with NOT", "NOT ")
+        } else {
+            (
+                "+ is not an operator; terms are required by default",
+                "Remove +",
+                "",
+            )
+        };
+        self.diagnostics.push(
+            Diagnostic::error(message, range)
+                .with_code("sign-operator")
+                .with_fix(title, range, replacement),
+        );
     }
 
     fn field_ignored(&mut self, start: usize, len: usize) {
@@ -656,21 +664,27 @@ mod tests {
     }
 
     #[test]
-    fn signs_only_before_operands() {
+    fn signs_before_operands_are_errors_with_fixes() {
+        let lexed = lex("-apple +\"pie\" c++ covid-19 - x");
         assert_eq!(
-            kinds("-apple +\"pie\" -(a) c++ covid-19 - x"),
+            lexed.diagnostics.codes(),
+            vec!["sign-operator", "sign-operator"]
+        );
+        let fixes: Vec<_> = lexed
+            .diagnostics
+            .items
+            .iter()
+            .map(|d| d.fix.as_ref().unwrap().replacement.as_str())
+            .collect();
+        assert_eq!(fixes, vec!["NOT ", ""]);
+        assert_eq!(
+            lexed.tokens.into_iter().map(|t| t.kind).collect::<Vec<_>>(),
             vec![
-                TokenKind::Minus,
                 word("apple"),
-                TokenKind::Plus,
                 TokenKind::Phrase {
                     text: "pie".into(),
                     slop: None
                 },
-                TokenKind::Minus,
-                TokenKind::LParen,
-                word("a"),
-                TokenKind::RParen,
                 word("c++"),
                 word("covid-19"),
                 word("-"),

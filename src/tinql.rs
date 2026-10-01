@@ -339,7 +339,6 @@ mod tests {
     fn negation_shapes() {
         assert_eq!(tinql("apple AND NOT banana"), "apple AND NOT banana");
         assert_eq!(tinql("apple NOT banana"), "apple AND NOT banana");
-        assert_eq!(tinql("apple -banana"), "apple AND NOT banana");
         assert_eq!(
             tinql("apple NOT banana NOT cherry"),
             "apple AND NOT (banana OR cherry)"

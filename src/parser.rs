@@ -22,13 +22,6 @@ struct Parser<'a> {
     diagnostics: DiagnosticList,
 }
 
-/// An operand plus whether it carried its own `+`/`-`/`NOT` marker, which
-/// decides whether adjacency to it deserves an implicit-operator warning.
-struct Operand {
-    node: Node,
-    marked: bool,
-}
-
 pub fn parse(source: &str, implicit: ImplicitOp) -> Parsed {
     let Lexed {
         tokens,
@@ -74,8 +67,6 @@ impl<'a> Parser<'a> {
                 | TokenKind::All
                 | TokenKind::LParen
                 | TokenKind::LBracket
-                | TokenKind::Plus
-                | TokenKind::Minus
                 | TokenKind::Not
         )
     }
@@ -114,7 +105,7 @@ impl<'a> Parser<'a> {
     fn parse_or(&mut self) -> Option<Node> {
         let mut children: Vec<Node> = Vec::new();
         if let Some(first) = self.parse_and() {
-            children.push(first.node);
+            children.push(first);
         }
         loop {
             match self.peek() {
@@ -122,7 +113,7 @@ impl<'a> Parser<'a> {
                     let span = self.bump().span;
                     let before = self.diagnostics.items.len();
                     match self.parse_and() {
-                        Some(operand) => children.push(operand.node),
+                        Some(node) => children.push(node),
                         None if self.diagnostics.items.len() == before => {
                             self.error("bare-operator", "OR has no search term after it", span)
                         }
@@ -130,11 +121,11 @@ impl<'a> Parser<'a> {
                     }
                 }
                 Some(kind) if self.implicit == ImplicitOp::Or && Self::starts_operand(kind) => {
-                    let Some(operand) = self.parse_and() else {
+                    let Some(node) = self.parse_and() else {
                         break;
                     };
-                    self.warn_implicit(children.last(), &operand);
-                    children.push(operand.node);
+                    self.warn_implicit(children.last(), &node);
+                    children.push(node);
                 }
                 _ => break,
             }
@@ -142,17 +133,15 @@ impl<'a> Parser<'a> {
         combine(children, ImplicitOp::Or)
     }
 
-    fn parse_and(&mut self) -> Option<Operand> {
-        let first = self.parse_not()?;
-        let mut marked = first.marked;
-        let mut children = vec![first.node];
+    fn parse_and(&mut self) -> Option<Node> {
+        let mut children = vec![self.parse_not()?];
         loop {
             match self.peek() {
                 Some(TokenKind::And) => {
                     let span = self.bump().span;
                     let before = self.diagnostics.items.len();
                     match self.parse_not() {
-                        Some(operand) => children.push(operand.node),
+                        Some(node) => children.push(node),
                         None if self.diagnostics.items.len() == before => {
                             self.error("bare-operator", "AND has no search term after it", span)
                         }
@@ -160,29 +149,26 @@ impl<'a> Parser<'a> {
                     }
                 }
                 Some(kind) if self.implicit == ImplicitOp::And && Self::starts_operand(kind) => {
-                    let Some(operand) = self.parse_not() else {
+                    let Some(node) = self.parse_not() else {
                         break;
                     };
-                    self.warn_implicit(children.last(), &operand);
-                    children.push(operand.node);
+                    self.warn_implicit(children.last(), &node);
+                    children.push(node);
                 }
                 _ => break,
             }
         }
-        if children.len() > 1 {
-            marked = false;
-        }
-        combine(children, ImplicitOp::And).map(|node| Operand { node, marked })
+        combine(children, ImplicitOp::And)
     }
 
-    /// `apple banana` warns; `apple NOT banana`, `apple -banana` and
-    /// `+apple +banana` carry explicit markers and do not.
-    fn warn_implicit(&mut self, previous: Option<&Node>, next: &Operand) {
+    /// `apple banana` warns; `apple NOT banana` carries an explicit operator
+    /// and does not.
+    fn warn_implicit(&mut self, previous: Option<&Node>, next: &Node) {
         let Some(previous) = previous else { return };
-        if next.node.is_negation() || next.marked {
+        if next.is_negation() {
             return;
         }
-        let span = previous.span().to(next.node.span());
+        let span = previous.span().to(next.span());
         let (message, operator) = match self.implicit {
             ImplicitOp::And => (
                 "Space-separated terms are combined with AND; use an explicit AND to make this clear",
@@ -193,7 +179,7 @@ impl<'a> Parser<'a> {
                 "OR",
             ),
         };
-        let (start, end) = (previous.span().end, next.node.span().start);
+        let (start, end) = (previous.span().end, next.span().start);
         let between = &self.source[start..end];
         let (gap, replacement) = if between.trim().is_empty() {
             (
@@ -219,58 +205,30 @@ impl<'a> Parser<'a> {
         );
     }
 
-    fn parse_not(&mut self) -> Option<Operand> {
-        match self.peek() {
-            Some(TokenKind::Not | TokenKind::Minus) => {
-                let token = self.bump();
-                let before = self.diagnostics.items.len();
-                match self.parse_not() {
-                    Some(operand) => {
-                        let span = token.span.to(operand.node.span());
-                        Some(Operand {
-                            node: Node::Not {
-                                child: Box::new(operand.node),
-                                span,
-                            },
-                            marked: true,
-                        })
-                    }
-                    None => {
-                        if self.diagnostics.items.len() == before {
-                            self.error(
-                                "bare-operator",
-                                format!("{} has no search term after it", token.kind.describe()),
-                                token.span,
-                            );
-                        }
-                        None
-                    }
-                }
+    fn parse_not(&mut self) -> Option<Node> {
+        if self.peek() != Some(&TokenKind::Not) {
+            return self.parse_proximity();
+        }
+        let token = self.bump();
+        let before = self.diagnostics.items.len();
+        match self.parse_not() {
+            Some(child) => {
+                let span = token.span.to(child.span());
+                Some(Node::Not {
+                    child: Box::new(child),
+                    span,
+                })
             }
-            Some(TokenKind::Plus) => {
-                let token = self.bump();
-                let before = self.diagnostics.items.len();
-                match self.parse_not() {
-                    Some(operand) => Some(Operand {
-                        node: operand.node,
-                        marked: true,
-                    }),
-                    None => {
-                        if self.diagnostics.items.len() == before {
-                            self.error(
-                                "bare-operator",
-                                "+ has no search term after it",
-                                token.span,
-                            );
-                        }
-                        None
-                    }
+            None => {
+                if self.diagnostics.items.len() == before {
+                    self.error(
+                        "bare-operator",
+                        "NOT has no search term after it",
+                        token.span,
+                    );
                 }
+                None
             }
-            _ => self.parse_proximity().map(|node| Operand {
-                node,
-                marked: false,
-            }),
         }
     }
 
@@ -427,9 +385,7 @@ impl<'a> Parser<'a> {
                 );
                 self.parse_primary()
             }
-            TokenKind::Not | TokenKind::Plus | TokenKind::Minus => {
-                self.parse_not().map(|operand| operand.node)
-            }
+            TokenKind::Not => self.parse_not(),
             TokenKind::Boost(_) => {
                 let token = self.bump();
                 self.error(
@@ -513,8 +469,6 @@ mod tests {
     fn not_forms() {
         assert_eq!(shape("a NOT b"), "a AND NOT b");
         assert_eq!(shape("a AND NOT b"), "a AND NOT b");
-        assert_eq!(shape("a -b"), "a AND NOT b");
-        assert_eq!(shape("+a +b"), "a AND b");
         assert_eq!(shape("NOT a"), "NOT a");
         assert_eq!(shape("NOT a OR b"), "NOT a OR b");
     }
@@ -536,16 +490,10 @@ mod tests {
     }
 
     #[test]
-    fn marked_operands_do_not_warn() {
-        for query in [
-            "apple NOT banana",
-            "apple -banana",
-            "+apple +banana",
-            "apple AND banana",
-        ] {
+    fn explicit_operators_do_not_warn() {
+        for query in ["apple NOT banana", "apple AND banana"] {
             assert!(codes(query).is_empty(), "{query:?}: {:?}", codes(query));
         }
-        assert_eq!(codes("+apple banana"), vec!["implicit-operator"]);
     }
 
     #[test]

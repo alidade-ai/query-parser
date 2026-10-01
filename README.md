@@ -12,7 +12,7 @@ toTinql('"health care" AND policy NOT (medicare OR medicaid)');
 // { ok: true, tinql: '("health care" AND policy) AND NOT (medicare OR medicaid)', diagnostics: { items: [] } }
 
 validate("apple banana OR cherry").items[0].code; // "mixed-and-or"
-format("apple -banana"); // "apple AND NOT banana"
+format("apple NOT banana"); // "apple AND NOT banana"
 ```
 
 Every function runs the same pipeline (lex → parse → lint → emit), so a query
@@ -24,7 +24,7 @@ Every function runs the same pipeline (lex → parse → lint → emit), so a qu
 | -------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
 | `climate policy`                 | Both terms (a space means AND; warned as `implicit-operator`)                                                       |
 | `a AND b`, `a OR b`              | Boolean operators, UPPER CASE only; `and`/`or` are ordinary words                                                   |
-| `NOT a`, `-a`, `a NOT b`         | Exclusion; emitted as TINQL `AND NOT`                                                                               |
+| `NOT a`, `a NOT b`               | Exclusion; emitted as TINQL `AND NOT`. `-a` / `+a` are errors (`sign-operator`), fixed to `NOT a` / `a`             |
 | `(a OR b) AND c`                 | Grouping. AND binds tighter than OR, but mixing them at one level without parentheses is an error (`mixed-and-or`)  |
 | `"health care"`, `'health care'` | Exact phrase (adjacent, in order)                                                                                   |
 | `"health care"~3`                | Phrase with up to 3 extra words between its terms, any phrase length; order-sensitive                               |
@@ -72,7 +72,8 @@ Errors (query is rejected): `bare-operator`, `mixed-and-or`, `unbalanced-paren`,
 letters or digits, would match nothing), `empty-wildcard`, `invalid-wildcard`,
 `invalid-fuzzy`, `fuzzy-too-large`, `invalid-slop`, `slop-too-large`,
 `invalid-proximity` (`NEAR` without `/N`), `negation-in-proximity`,
-`invalid-boost`, `dangling-modifier`, `unterminated-comment` (`<<<` without
+`invalid-boost`, `dangling-modifier`, `sign-operator` (`-a` / `+a`; use `NOT`),
+`unterminated-comment` (`<<<` without
 `>>>`), `stray-comment-end`, `unexpected-token`.
 
 Warnings: `implicit-operator`, `mixed-near` (a bare `NEAR`/`THEN` next to
